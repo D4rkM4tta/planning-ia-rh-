@@ -1,30 +1,26 @@
+import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
-import streamlit as st
-import json
 
-# ================= FIREBASE INIT =================
+# ==================================================
+# 🔥 INITIALISATION FIREBASE (UNE SEULE FOIS)
+# ==================================================
 if not firebase_admin._apps:
-    # Charger la clé depuis Streamlit Secrets
-    import firebase_admin
-    from firebase_admin import credentials, auth, firestore
-    import streamlit as st
-
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(dict(st.secrets["firebase"]))
-        firebase_admin.initialize_app(cred)
-
-    db = firestore.client()
-    USERS = db.collection("users")
+    cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
+
+# ==================================================
+# 📂 COLLECTIONS
+# ==================================================
 USERS = db.collection("users")
 LOCKS = db.collection("planning_locks")
 PLANNINGS = db.collection("plannings")
 
-
-# ================= AUTH =================
+# ==================================================
+# 🔐 AUTHENTIFICATION
+# ==================================================
 def login_user(email, password):
     try:
         user = auth.get_user_by_email(email)
@@ -54,8 +50,9 @@ def is_admin():
 
     return bool(doc.to_dict().get("admin", False))
 
-
-# ================= AVAILABILITÉS =================
+# ==================================================
+# 📅 DISPONIBILITÉS
+# ==================================================
 def load_availability(email, year, month):
     doc = USERS.document(email).get()
     if not doc.exists:
@@ -69,16 +66,17 @@ def save_availability(email, year, month, availability):
         merge=True
     )
 
-
-# ================= USERS =================
+# ==================================================
+# 👥 UTILISATEURS
+# ==================================================
 def get_all_users():
-    return {d.id: d.to_dict() for d in USERS.stream()}
+    return {doc.id: doc.to_dict() for doc in USERS.stream()}
 
-
-# ================= PLANNING LOCK =================
+# ==================================================
+# 🔒 VERROUILLAGE PLANNING
+# ==================================================
 def is_planning_locked(year, month):
-    doc = LOCKS.document(f"{year}_{month}").get()
-    return doc.exists
+    return LOCKS.document(f"{year}_{month}").get().exists
 
 
 def lock_planning(year, month, planning_data):
