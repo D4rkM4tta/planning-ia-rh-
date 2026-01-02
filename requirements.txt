@@ -1,0 +1,7 @@
+streamlit
+pandas
+xlsxwriter
+icalendar
+firebase-admin
+google-cloud-firestore
+python-dateutil
