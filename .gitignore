@@ -1,0 +1,10 @@
+# Environnement virtuel
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+firebase_key.json
+.streamlit/
