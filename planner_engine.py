@@ -16,116 +16,85 @@ from collections import defaultdict
 # ============================================================
 
 
+import datetime as dt
+import calendar
+
+
 def generate_planning(
+    *,
     year: int,
     month: int,
     users: dict,
     availability_by_user: dict,
-    contract_hours: dict,
+    contract_hours: dict
 ):
     """
-    users: { email: {name, contract_hours, ...} }
-    availability_by_user: { email: { 'YYYY-MM-DD': True/False } }
-    contract_hours: { email: int }
+    Génère un planning mensuel basé sur :
+    - disponibilités (True = dispo)
+    - règles RH blocs semaine / week-end
     """
 
-    # -------------------------------
-    # 1️⃣ Construire les blocs du mois
-    # -------------------------------
     blocks = []
+    warnings = []
 
-    cal = calendar.Calendar(firstweekday=0)  # Lundi
+    cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(year, month)
 
-    for week_index, week in enumerate(weeks, start=1):
+    block_id = 0
+
+    for w_idx, week in enumerate(weeks, start=1):
         # Bloc semaine (Lundi → Jeudi)
-        week_days = week[0:4]
-        if any(d.month == month for d in week_days):
+        week_days = [d for d in week if d.month == month and d.weekday() <= 3]
+        if week_days:
             blocks.append({
-                "week": week_index,
+                "id": block_id,
+                "week": w_idx,
                 "type": "week",
                 "start": week_days[0],
                 "end": week_days[-1],
-                "days": [d for d in week_days if d.month == month],
-                "hours": 40,
+                "hours": len(week_days) * 10,
                 "assigned_to": None,
-                "status": "UNASSIGNED",
+                "status": "unassigned",
             })
+            block_id += 1
 
         # Bloc week-end (Vendredi → Dimanche)
-        weekend_days = week[4:7]
-        if any(d.month == month for d in weekend_days):
+        weekend_days = [d for d in week if d.month == month and d.weekday() >= 4]
+        if weekend_days:
             blocks.append({
-                "week": week_index,
+                "id": block_id,
+                "week": w_idx,
                 "type": "weekend",
                 "start": weekend_days[0],
                 "end": weekend_days[-1],
-                "days": [d for d in weekend_days if d.month == month],
-                "hours": 30,
+                "hours": len(weekend_days) * 10,
                 "assigned_to": None,
-                "status": "UNASSIGNED",
+                "status": "unassigned",
             })
+            block_id += 1
 
-    # ------------------------------------
-    # 2️⃣ Préparer le suivi par utilisateur
-    # ------------------------------------
-    last_block_index = {}              # dernier bloc travaillé par user
-    hours_worked = defaultdict(int)    # heures cumulées
-    warnings = []
+    # Tentative d’affectation simple (V1)
+    for block in blocks:
+        for email, avail in availability_by_user.items():
+            days = [
+                d.isoformat()
+                for d in (
+                    block["start"] + dt.timedelta(days=i)
+                    for i in range((block["end"] - block["start"]).days + 1)
+                )
+            ]
 
-    # ------------------------------------
-    # 3️⃣ Attribution des blocs (simple)
-    # ------------------------------------
-    for idx, block in enumerate(blocks):
-        assigned = False
+            if all(avail.get(day) is True for day in days):
+                block["assigned_to"] = email
+                block["status"] = "assigned"
+                break
 
-        for email in users.keys():
-            # ⛔ règle : pas deux blocs consécutifs
-            if last_block_index.get(email) == idx - 1:
-                continue
-
-            # ⛔ vérifier disponibilité complète du bloc
-            avail = availability_by_user.get(email, {})
-            is_available = True
-            for d in block["days"]:
-                if avail.get(d.isoformat()) is not True:
-                    is_available = False
-                    break
-
-            if not is_available:
-                continue
-
-            # ✅ attribution
-            block["assigned_to"] = email
-            block["status"] = "ASSIGNED"
-            last_block_index[email] = idx
-            hours_worked[email] += block["hours"]
-            assigned = True
-            break
-
-        if not assigned:
-            block["status"] = "UNCOVERED"
+        if block["assigned_to"] is None:
             warnings.append(
-                f"Bloc {block['type']} semaine {block['week']} "
-                f"({block['start'].strftime('%d/%m')} → {block['end'].strftime('%d/%m')}) non couvert"
+                f"Bloc {block['type']} semaine {block['week']} non couvert"
             )
 
-    # ------------------------------------
-    # 4️⃣ Alertes RH simples
-    # ------------------------------------
-    for email, hours in hours_worked.items():
-        contract = contract_hours.get(email, 0)
-        if contract and hours > contract:
-            warnings.append(
-                f"{users[email].get('name', email)} dépasse son contrat "
-                f"({hours}h / {contract}h)"
-            )
-
-    # ------------------------------------
-    # 5️⃣ Résultat final
-    # ------------------------------------
     return {
         "blocks": blocks,
-        "hours_worked": dict(hours_worked),
         "warnings": warnings,
     }
