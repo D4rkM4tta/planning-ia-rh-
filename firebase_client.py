@@ -6,8 +6,16 @@ import json
 # ================= FIREBASE INIT =================
 if not firebase_admin._apps:
     # Charger la clé depuis Streamlit Secrets
-    firebase_key_dict = json.loads(st.secrets["firebase_key"])
-    cred = credentials.Certificate(firebase_key_dict)
+    import firebase_admin
+    from firebase_admin import credentials, auth, firestore
+    import streamlit as st
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(dict(st.secrets["firebase"]))
+        firebase_admin.initialize_app(cred)
+
+    db = firestore.client()
+    USERS = db.collection("users")
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
