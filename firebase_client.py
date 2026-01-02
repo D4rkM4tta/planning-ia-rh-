@@ -1,26 +1,32 @@
-import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
+import streamlit as st
 
-# ==================================================
-# 🔥 INITIALISATION FIREBASE (UNE SEULE FOIS)
-# ==================================================
+# ================= FIREBASE INIT =================
 if not firebase_admin._apps:
-    cred = credentials.Certificate(dict(st.secrets["firebase"]))
+    firebase_config = {
+        "type": st.secrets["firebase"]["type"],
+        "project_id": st.secrets["firebase"]["project_id"],
+        "private_key_id": st.secrets["firebase"]["private_key_id"],
+        "private_key": st.secrets["firebase"]["private_key"],
+        "client_email": st.secrets["firebase"]["client_email"],
+        "client_id": st.secrets["firebase"]["client_id"],
+        "auth_uri": st.secrets["firebase"]["auth_uri"],
+        "token_uri": st.secrets["firebase"]["token_uri"],
+        "auth_provider_x509_cert_url": st.secrets["firebase"]["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": st.secrets["firebase"]["client_x509_cert_url"],
+    }
+
+    cred = credentials.Certificate(firebase_config)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
-
-# ==================================================
-# 📂 COLLECTIONS
-# ==================================================
 USERS = db.collection("users")
 LOCKS = db.collection("planning_locks")
 PLANNINGS = db.collection("plannings")
 
-# ==================================================
-# 🔐 AUTHENTIFICATION
-# ==================================================
+
+# ================= AUTH =================
 def login_user(email, password):
     try:
         user = auth.get_user_by_email(email)
@@ -50,9 +56,8 @@ def is_admin():
 
     return bool(doc.to_dict().get("admin", False))
 
-# ==================================================
-# 📅 DISPONIBILITÉS
-# ==================================================
+
+# ================= AVAILABILITÉS =================
 def load_availability(email, year, month):
     doc = USERS.document(email).get()
     if not doc.exists:
@@ -66,15 +71,13 @@ def save_availability(email, year, month, availability):
         merge=True
     )
 
-# ==================================================
-# 👥 UTILISATEURS
-# ==================================================
-def get_all_users():
-    return {doc.id: doc.to_dict() for doc in USERS.stream()}
 
-# ==================================================
-# 🔒 VERROUILLAGE PLANNING
-# ==================================================
+# ================= USERS =================
+def get_all_users():
+    return {d.id: d.to_dict() for d in USERS.stream()}
+
+
+# ================= PLANNING LOCK =================
 def is_planning_locked(year, month):
     return LOCKS.document(f"{year}_{month}").get().exists
 
