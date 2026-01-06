@@ -4,26 +4,14 @@ import streamlit as st
 
 # ================= FIREBASE INIT =================
 if not firebase_admin._apps:
-    firebase_config = {
-        "type": st.secrets["firebase"]["type"],
-        "project_id": st.secrets["firebase"]["project_id"],
-        "private_key_id": st.secrets["firebase"]["private_key_id"],
-        "private_key": st.secrets["firebase"]["private_key"],
-        "client_email": st.secrets["firebase"]["client_email"],
-        "client_id": st.secrets["firebase"]["client_id"],
-        "auth_uri": st.secrets["firebase"]["auth_uri"],
-        "token_uri": st.secrets["firebase"]["token_uri"],
-        "auth_provider_x509_cert_url": st.secrets["firebase"]["auth_provider_x509_cert_url"],
-        "client_x509_cert_url": st.secrets["firebase"]["client_x509_cert_url"],
-    }
-
-    cred = credentials.Certificate(firebase_config)
+    cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
+
 USERS = db.collection("users")
 LOCKS = db.collection("planning_locks")
-PLANNINGS = db.collection("plannings")
+FORCED = db.collection("forced_assignments")
 
 
 # ================= AUTH =================
@@ -48,9 +36,13 @@ def is_admin():
     if not auth_user:
         return False
 
-    email = auth_user.get("email")
-    doc = USERS.document(email).get()
-    return doc.exists and bool(doc.to_dict().get("admin", False))
+    doc = USERS.document(auth_user["email"]).get()
+    return bool(doc.exists and doc.to_dict().get("admin", False))
+
+
+# ================= USERS =================
+def get_all_users():
+    return {d.id: d.to_dict() for d in USERS.stream()}
 
 
 # ================= AVAILABILITÉS =================
@@ -68,9 +60,17 @@ def save_availability(email, year, month, availability):
     )
 
 
-# ================= USERS =================
-def get_all_users():
-    return {d.id: d.to_dict() for d in USERS.stream()}
+# ================= FORÇAGE ADMIN =================
+def load_forced_assignments(year, month):
+    doc = FORCED.document(f"{year}_{month}").get()
+    return doc.to_dict() if doc.exists else {}
+
+
+def save_forced_assignment(year, month, day_iso, email):
+    FORCED.document(f"{year}_{month}").set(
+        {day_iso: email},
+        merge=True
+    )
 
 
 # ================= PLANNING LOCK =================
@@ -78,11 +78,5 @@ def is_planning_locked(year, month):
     return LOCKS.document(f"{year}_{month}").get().exists
 
 
-def lock_planning(year, month, planning_data):
+def lock_planning(year, month, planning_data, hours_by_user):
     LOCKS.document(f"{year}_{month}").set({"locked": True})
-    PLANNINGS.document(f"{year}_{month}").set(planning_data)
-
-
-def load_locked_planning(year, month):
-    doc = PLANNINGS.document(f"{year}_{month}").get()
-    return doc.to_dict() if doc.exists else None
