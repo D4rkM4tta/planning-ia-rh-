@@ -13,6 +13,10 @@ from firebase_client import (
     get_all_users,
     is_planning_locked,
     lock_planning,
+    load_planning_proposals,
+    save_planning_proposal,
+    vote_planning,
+    validate_planning,
 )
 
 from components.calendar_availability import availability_calendar
@@ -21,79 +25,32 @@ from planner_engine import generate_planning
 st.set_page_config(page_title="Planning IA RH", layout="wide")
 
 # ============================================================
-# NORMALISATION DES DISPONIBILITÉS (CRITIQUE)
+# UTILITAIRES
 # ============================================================
 def normalize_availability(raw: dict) -> dict:
-    normalized = {}
-    for raw_key, value in raw.items():
-        if value is not True:
-            continue
-        try:
-            normalized[str(raw_key)[:10]] = True
-        except Exception:
-            continue
-    return normalized
+    return {str(k)[:10]: True for k, v in raw.items() if v is True}
 
 
-# ============================================================
-# EXPORT EXCEL (STABLE)
-# ============================================================
-def export_excel(blocks, users):
-    rows = []
-    for block in blocks:
-        current = block["start"]
-        while current <= block["end"]:
-            rows.append({
-                "Date": current.strftime("%Y-%m-%d"),
-                "Jour": current.strftime("%A"),
-                "Bloc": f"Bloc {block['id']}",
-                "Collaborateur": (
-                    users[block["assigned_to"]]["name"]
-                    if block["assigned_to"] else "NON COUVERT"
-                )
-            })
-            current += dt.timedelta(days=1)
-
-    df = pd.DataFrame(rows)
-    output = BytesIO()
-    df.to_excel(output, index=False)
-    output.seek(0)
-    return output
-
-
-# ============================================================
-# CALCUL DES HEURES (1 jour = 10h)
-# ============================================================
 def compute_hours(blocks):
     stats = {}
-    for block in blocks:
-        user = block["assigned_to"]
-        if not user:
+    for b in blocks:
+        u = b["assigned_to"]
+        if not u:
             continue
-
-        days = len(block["days"])
-        hours = days * 10
-
-        if user not in stats:
-            stats[user] = {"days": 0, "hours": 0}
-
-        stats[user]["days"] += days
-        stats[user]["hours"] += hours
-
+        stats.setdefault(u, {"days": 0, "hours": 0})
+        stats[u]["days"] += len(b["days"])
+        stats[u]["hours"] += len(b["days"]) * 10
     return stats
 
 
 # ============================================================
 # SESSION
 # ============================================================
-if "auth_user" not in st.session_state:
-    st.session_state.auth_user = None
-
-if "forced_assignments" not in st.session_state:
-    st.session_state.forced_assignments = {}
-
-if "generated_planning" not in st.session_state:
-    st.session_state.generated_planning = None
+for k, v in {
+    "auth_user": None,
+    "forced_assignments": {},
+}.items():
+    st.session_state.setdefault(k, v)
 
 
 # ============================================================
@@ -103,23 +60,18 @@ def login_screen():
     st.title("🔐 Connexion Planning IA RH")
     email = st.text_input("Email")
     password = st.text_input("Mot de passe", type="password")
-
     if st.button("Se connecter"):
         if login_user(email, password):
-            st.success("Connexion réussie")
             st.rerun()
         else:
             st.error("Identifiants incorrects")
 
 
-if st.session_state.auth_user is None:
+if not st.session_state.auth_user:
     login_screen()
     st.stop()
 
 
-# ============================================================
-# CONNECTÉ
-# ============================================================
 email = st.session_state.auth_user["email"]
 admin = is_admin()
 
@@ -130,23 +82,26 @@ if st.button("Se déconnecter"):
     st.rerun()
 
 
-tab1, tab2, tab3, tab4 = st.tabs([
+# ============================================================
+# ONGLET
+# ============================================================
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📌 Mes disponibilités",
     "📋 Admin",
+    "📅 Plannings proposés",
     "📜 Règles RH",
     "⏱️ Heures",
 ])
-
 
 # ============================================================
 # TAB 1 — DISPONIBILITÉS
 # ============================================================
 with tab1:
-    year = st.selectbox("Année", [2026, 2027], index=0)
-    month = st.selectbox("Mois", list(range(1, 13)), index=2)
+    year = st.selectbox("Année", [2026, 2027], index=0, key="user_year")
+    month = st.selectbox("Mois", list(range(1, 13)), index=2, key="user_month")
 
     if is_planning_locked(year, month):
-        st.info("🔒 Le planning est verrouillé.")
+        st.info("🔒 Planning verrouillé")
     else:
         availability_calendar(
             email=email,
@@ -159,200 +114,190 @@ with tab1:
             forced_assignments=st.session_state.forced_assignments,
         )
 
-
 # ============================================================
 # TAB 2 — ADMIN
 # ============================================================
 with tab2:
     if not admin:
-        st.warning("Accès réservé à l’administrateur")
-        st.stop()
+        st.info("🔒 Onglet réservé aux administrateurs.")
+    else:
+        year_admin = st.selectbox("Année", [2026, 2027], index=0, key="admin_year")
+        month_admin = st.selectbox("Mois", list(range(1, 13)), index=2, key="admin_month")
 
-    st.header("👥 Disponibilités équipe")
+        users = get_all_users()
+        availability_by_user = {
+            u: normalize_availability(load_availability(u, year_admin, month_admin))
+            for u in users
+        }
 
-    year_admin = st.selectbox("Année", [2026, 2027], index=0, key="admin_year")
-    month_admin = st.selectbox("Mois", list(range(1, 13)), index=2, key="admin_month")
+        # -------- PREVIEW DISPONIBILITÉS --------
+        st.subheader("📅 Disponibilités équipe")
 
-    users = get_all_users()
+        COLORS = [
+            "#FB8C00", "#3949AB", "#00ACC1", "#8E24AA",
+            "#43A047", "#E53935", "#6D4C41", "#1E88E5"
+        ]
+        user_colors = {u: COLORS[i % len(COLORS)] for i, u in enumerate(users)}
 
-    availability_by_user = {
-        u: normalize_availability(load_availability(u, year_admin, month_admin))
-        for u in users
-    }
+        cal = calendar.Calendar(firstweekday=0)
+        weeks = cal.monthdatescalendar(year_admin, month_admin)
 
-    # ========================================================
-    # PREVIEW DES DISPONIBILITÉS (RESTAURÉE)
-    # ========================================================
-    st.divider()
-    st.subheader("📅 Disponibilités renseignées")
-
-    COLORS = [
-        "#FB8C00", "#3949AB", "#00ACC1", "#8E24AA",
-        "#43A047", "#E53935", "#6D4C41", "#1E88E5"
-    ]
-
-    user_colors = {
-        email: COLORS[i % len(COLORS)]
-        for i, email in enumerate(users)
-    }
-
-    dispo_by_day = {}
-    for u, avail in availability_by_user.items():
-        for d in avail:
-            dispo_by_day.setdefault(d, []).append(u)
-
-    cal = calendar.Calendar(firstweekday=0)
-    weeks = cal.monthdatescalendar(year_admin, month_admin)
-
-    headers = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
-    cols = st.columns(7)
-    for i, h in enumerate(headers):
-        cols[i].markdown(f"**{h}**")
-
-    for week in weeks:
-        cols = st.columns(7)
-        for i, day in enumerate(week):
-            if day.month != month_admin:
-                cols[i].markdown(
-                    f"<div style='opacity:0.3;text-align:center'>{day.day}</div>",
-                    unsafe_allow_html=True
-                )
-                continue
-
-            inner = ""
-            for u in dispo_by_day.get(day.isoformat(), []):
-                inner += (
-                    f"<div style='background:{user_colors[u]};"
-                    "color:white;border-radius:6px;"
-                    "padding:2px 6px;margin:2px 0;"
-                    "font-size:11px;text-align:center;'>"
-                    f"{users[u]['name']}</div>"
-                )
-
-            cols[i].markdown(
-                f"""
-                <div style="min-height:90px;
-                            padding:6px;
-                            border-radius:8px;
-                            background:#ECEFF1;">
-                    <strong>{day.day}</strong>
-                    {inner}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-    # ========================================================
-    # GÉNÉRATION DU PLANNING
-    # ========================================================
-    st.divider()
-    st.subheader("🧠 Génération du planning")
-
-    if st.button("🚀 Générer / Relancer le planning"):
-        st.session_state.generated_planning = generate_planning(
-            year=year_admin,
-            month=month_admin,
-            users=users,
-            availability_by_user=availability_by_user,
-            forced_assignments=st.session_state.forced_assignments,
-        )
-        st.success("Planning généré")
-
-    if st.session_state.generated_planning:
-        result = st.session_state.generated_planning
-
-        st.divider()
-        st.subheader("📅 Planning généré")
-
-        day_assignments = {}
-        for block in result["blocks"]:
-            current = block["start"]
-            while current <= block["end"]:
-                if current.month == month_admin:
-                    day_assignments[current.isoformat()] = block["assigned_to"]
-                current += dt.timedelta(days=1)
+        dispo_by_day = {}
+        for u, days in availability_by_user.items():
+            for d in days:
+                dispo_by_day.setdefault(d, []).append(u)
 
         for week in weeks:
             cols = st.columns(7)
             for i, day in enumerate(week):
                 if day.month != month_admin:
-                    cols[i].markdown(
-                        f"<div style='opacity:0.3;text-align:center'>{day.day}</div>",
-                        unsafe_allow_html=True
-                    )
+                    cols[i].markdown(f"<div style='opacity:.3'>{day.day}</div>", unsafe_allow_html=True)
                     continue
 
-                user = day_assignments.get(day.isoformat())
-                if user:
-                    html = f"""
-                    <div style="background:{user_colors[user]};
-                        color:white;border-radius:10px;
-                        padding:10px;text-align:center;">
-                        <div>{day.day}</div>
-                        <div>{users[user]['name']}</div>
-                    </div>
-                    """
-                else:
-                    html = f"""
-                    <div style="background:#F5F5F5;
-                        color:#B71C1C;border:2px dashed #D32F2F;
-                        border-radius:10px;padding:10px;text-align:center;">
-                        <div>{day.day}</div>
-                        <div>NON COUVERT</div>
-                    </div>
-                    """
+                inner = "".join(
+                    f"<div style='background:{user_colors[u]};color:white;"
+                    f"border-radius:6px;padding:2px 6px;margin:2px 0;font-size:11px;text-align:center;'>"
+                    f"{users[u]['name']}</div>"
+                    for u in dispo_by_day.get(day.isoformat(), [])
+                )
 
-                cols[i].markdown(html, unsafe_allow_html=True)
+                cols[i].markdown(
+                    f"<div style='min-height:90px;background:#ECEFF1;border-radius:8px;padding:6px'>"
+                    f"<strong>{day.day}</strong>{inner}</div>",
+                    unsafe_allow_html=True
+                )
 
-        excel = export_excel(result["blocks"], users)
-        st.download_button(
-            "📊 Export Excel",
-            excel,
-            file_name=f"planning_{year_admin}_{month_admin}.xlsx",
-        )
+        st.divider()
 
-        if st.button("🔒 Valider et verrouiller le planning"):
-            lock_planning(year_admin, month_admin, planning_data=result["blocks"])
-            st.success("Planning verrouillé 🔒")
+        # -------- GÉNÉRATION DES 5 PLANNINGS --------
+        if st.button("🚀 Générer 5 plannings"):
+            for i in range(5):
+                planning = generate_planning(
+                    year=year_admin,
+                    month=month_admin,
+                    users=users,
+                    availability_by_user=availability_by_user,
+                    forced_assignments=st.session_state.forced_assignments,
+                )
+                save_planning_proposal(year_admin, month_admin, i + 1, planning, email)
 
+            st.success("✅ 5 plannings générés et proposés")
 
 # ============================================================
-# TAB 3 — RÈGLES RH
+# TAB 3 — PLANNINGS PROPOSÉS (VISIBLE POUR TOUS)
 # ============================================================
 with tab3:
-    st.header("📜 Règles RH")
-    st.markdown("""
-- 1 jour travaillé = **10 heures**
-- Une personne **ne peut pas faire deux blocs consécutifs**
-- Les disponibilités sont **strictes**
-- Le forçage admin est **prioritaire**
-- Chaque collaborateur doit apparaître **au moins une fois**
-""")
+    year_v = st.selectbox("Année", [2026, 2027], index=0, key="view_year")
+    month_v = st.selectbox("Mois", list(range(1, 13)), index=2, key="view_month")
 
+    proposals = load_planning_proposals(year_v, month_v)
+
+    if not proposals:
+        st.info("Aucun planning proposé pour ce mois.")
+    else:
+        users = get_all_users()
+        COLORS = [
+            "#FB8C00", "#3949AB", "#00ACC1", "#8E24AA",
+            "#43A047", "#E53935", "#6D4C41", "#1E88E5"
+        ]
+        user_colors = {u: COLORS[i % len(COLORS)] for i, u in enumerate(users)}
+
+        cal = calendar.Calendar(firstweekday=0)
+        weeks = cal.monthdatescalendar(year_v, month_v)
+
+        for pid, proposal in proposals.items():
+            st.divider()
+            st.subheader(f"📅 {pid.replace('_', ' ').title()}")
+
+            blocks = proposal["planning"]["blocks"]
+
+            day_map = {}
+            for b in blocks:
+                cur = b["start"]
+                while cur <= b["end"]:
+                    if cur.month == month_v:
+                        day_map[cur.isoformat()] = b["assigned_to"]
+                    cur += dt.timedelta(days=1)
+
+            for week in weeks:
+                cols = st.columns(7)
+                for i, day in enumerate(week):
+                    if day.month != month_v:
+                        cols[i].markdown(f"<div style='opacity:.3'>{day.day}</div>", unsafe_allow_html=True)
+                        continue
+
+                    u = day_map.get(day.isoformat())
+                    if u:
+                        html = (
+                            f"<div style='background:{user_colors[u]};color:white;"
+                            f"border-radius:10px;padding:8px;text-align:center;font-size:12px'>"
+                            f"{day.day}<br>{users[u]['name']}</div>"
+                        )
+                    else:
+                        html = (
+                            f"<div style='border:2px dashed #D32F2F;color:#B71C1C;"
+                            f"border-radius:10px;padding:8px;text-align:center;font-size:11px'>"
+                            f"{day.day}<br>NON COUVERT</div>"
+                        )
+
+                    cols[i].markdown(html, unsafe_allow_html=True)
+
+            votes = proposal.get("votes", {})
+            st.write(f"👍 {sum(votes.values())} | 👎 {len(votes) - sum(votes.values())}")
+
+            if not admin:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.button("✅ Je valide", key=f"ok_{pid}",
+                              on_click=vote_planning,
+                              args=(year_v, month_v, pid, email, True))
+                with c2:
+                    st.button("❌ Je rejette", key=f"no_{pid}",
+                              on_click=vote_planning,
+                              args=(year_v, month_v, pid, email, False))
+
+            if admin:
+                if st.button("🔒 Valider ce planning", key=f"admin_{pid}"):
+                    validate_planning(year_v, month_v, pid)
+                    lock_planning(year_v, month_v, blocks)
+                    st.success("Planning validé définitivement")
 
 # ============================================================
-# TAB 4 — HEURES
+# TAB 4 — RÈGLES RH
 # ============================================================
 with tab4:
-    st.header("⏱️ Heures mensuelles")
+    st.markdown("""
+### 📜 Règles RH
+- 1 jour = **10 heures**
+- Pas de blocs consécutifs
+- Disponibilités strictes
+- Forçage admin prioritaire
+- Tous les collaborateurs doivent apparaître
+""")
 
-    if not st.session_state.generated_planning:
-        st.info("Générez un planning pour afficher les heures.")
-        st.stop()
+# ============================================================
+# TAB 5 — HEURES
+# ============================================================
+with tab5:
+    proposals = load_planning_proposals(year_v, month_v)
+    validated = next((p for p in proposals.values() if p["status"] == "VALIDATED"), None)
 
-    result = st.session_state.generated_planning
-    stats = compute_hours(result["blocks"])
+    if not validated:
+        st.info("Aucun planning validé.")
+    else:
+        stats = compute_hours(validated["planning"]["blocks"])
+        users = get_all_users()
 
-    st.markdown("**Règle : 1 jour travaillé = 10 heures**")
-    st.divider()
-
-    total = 0
-    for u, data in stats.items():
-        total += data["hours"]
-        with st.container(border=True):
-            st.markdown(f"### {users[u]['name']}")
-            st.write(f"📅 Jours travaillés : {data['days']}")
-            st.write(f"⏱️ Heures : **{data['hours']} h**")
-
-    st.divider()
-    st.markdown(f"### ⏱️ Total équipe : **{total} heures**")
+        for u, d in stats.items():
+            if not admin and u != email:
+                continue
+            st.markdown(
+                f"""
+                <div style="background:#ECEFF1;padding:12px;border-radius:10px">
+                    <strong>{users[u]['name']}</strong><br>
+                    📅 {d['days']} jours<br>
+                    ⏱️ {d['hours']} heures
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
