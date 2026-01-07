@@ -243,7 +243,10 @@ with tab3:
                     cols[i].markdown(html, unsafe_allow_html=True)
 
             votes = proposal.get("votes", {})
-            st.write(f"👍 {sum(votes.values())} | 👎 {len(votes) - sum(votes.values())}")
+            up = sum(1 for v in votes.values() if v is True)
+            down = sum(1 for v in votes.values() if v is False)
+
+            st.write(f"👍 {up} | 👎 {down}")
 
             if not admin:
                 c1, c2 = st.columns(2)
