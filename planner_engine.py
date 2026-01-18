@@ -1,3 +1,8 @@
+# ============================================================
+# BASELINE SOLVEUR — NE PAS MODIFIER
+# Version validée fonctionnellement (forçage + marges + équité)
+# Date : 2026-01
+# ============================================================
 import calendar
 import datetime as dt
 import random
