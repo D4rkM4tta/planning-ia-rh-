@@ -72,7 +72,12 @@ def save_availability(email: str, year: int, month: int, availability: dict) -> 
 # ============================================================
 # FORÇAGE ADMIN
 # ============================================================
-def save_forced_assignment(year: int, month: int, day_iso: str, email: str | None) -> None:
+def save_forced_assignment(
+    year: int,
+    month: int,
+    day_iso: str,
+    email: str | None,
+) -> None:
     ref = FORCED.document(f"{year}_{month}")
     if email is None:
         ref.update({day_iso: firestore.DELETE_FIELD})
@@ -144,3 +149,56 @@ def load_planning_proposals(year: int, month: int) -> dict:
 
     data["planning"] = deserialize_planning(data["planning"])
     return {"current": data}
+
+# ============================================================
+# HEURES MENSUELLES (AJUSTABLES)
+# ============================================================
+def load_monthly_hours(email: str, year: int, month: int) -> int | None:
+    """
+    Retourne les heures mensuelles ajustées si elles existent,
+    sinon None
+    """
+    doc = USERS.document(email).get()
+    if not doc.exists:
+        return None
+
+    return doc.to_dict().get(f"hours_{year}_{month}")
+
+
+def save_monthly_hours(email: str, year: int, month: int, hours: int) -> None:
+    """
+    Sauvegarde les heures mensuelles ajustées
+    """
+    USERS.document(email).set(
+        {f"hours_{year}_{month}": int(hours)},
+        merge=True,
+    )
+
+# ============================================================
+# HEURES RÉELLES (MOIS PAR MOIS)
+# ============================================================
+def load_actual_month_hours(email: str, year: int, month: int) -> int | None:
+    """
+    Heures réellement effectuées pour un utilisateur sur un mois donné
+    (corrigées manuellement si besoin)
+    """
+    doc = USERS.document(email).get()
+    if not doc.exists:
+        return None
+
+    return doc.to_dict().get(f"actual_hours_{year}_{month}")
+
+
+def save_actual_month_hours(
+    email: str,
+    year: int,
+    month: int,
+    hours: int,
+) -> None:
+    """
+    Sauvegarde des heures réellement effectuées pour un mois donné
+    """
+    USERS.document(email).set(
+        {f"actual_hours_{year}_{month}": int(hours)},
+        merge=True,
+    )
