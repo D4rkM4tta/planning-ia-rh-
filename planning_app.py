@@ -11,6 +11,8 @@ from firebase_client import (
     get_all_users,
     load_planning_proposals,
     save_planning_proposal,
+    load_monthly_hours,      # ✅ AJOUT
+    save_monthly_hours,      # ✅ AJOUT
 )
 
 from components.calendar_availability import availability_calendar
@@ -298,17 +300,50 @@ with tab5:
             if not admin and user_email != current_email:
                 continue
 
-            st.markdown(
-                f"""
-                <div style="background:#1E1E1E;color:#ECEFF1;padding:16px;border-radius:14px;margin-bottom:12px;">
-                    <b>{user_info['name']}</b><br><br>
-                    ⏱️ Mois : <b>{monthly_stats.get(user_email, {}).get("hours", 0)} h</b><br>
-                    📊 Cumul année : <b>{cumulative_stats.get(user_email, 0)} h</b><br>
-                    🔄 Glissant 12 mois : <b>{rolling_stats.get(user_email, 0)} h</b>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            # 🔹 Contrat horaire mensuel (Firestore)
+            contract_hours = int(user_info.get("monthly_hours") or 0)
+
+            # 🔹 Heures calculées depuis le planning
+            computed_hours = monthly_stats.get(user_email, {}).get("hours", 0)
+
+            # 🔹 Heures mensuelles ajustées (Firestore)
+            stored_hours = load_monthly_hours(user_email, year_v, month_v)
+            month_hours = stored_hours if stored_hours is not None else computed_hours
+
+            # 🔧 Correction des cumuls (évite double comptage)
+            raw_cumulative = cumulative_stats.get(user_email, 0)
+            corrected_cumulative = raw_cumulative - computed_hours + month_hours
+
+            raw_rolling = rolling_stats.get(user_email, 0)
+            corrected_rolling = raw_rolling - computed_hours + month_hours
+
+            col_left, col_right = st.columns([3, 1])
+
+            with col_left:
+                st.markdown(
+                    f"""
+**{user_info['name']}**
+
+📄 **Contrat horaire mensuel** : {contract_hours} h  
+⏱️ **Heures du mois** : {month_hours} h  
+📊 **Cumul année** : {corrected_cumulative} h  
+🔄 **Glissant 12 mois** : {corrected_rolling} h
+""",
+                )
+
+            with col_right:
+                new_hours = st.number_input(
+                    "Heures du mois",
+                    min_value=0,
+                    max_value=300,
+                    step=1,
+                    value=int(month_hours),
+                    key=f"hours_{user_email}_{year_v}_{month_v}",
+                )
+
+                if new_hours != month_hours:
+                    save_monthly_hours(user_email, year_v, month_v, int(new_hours))
+                    st.rerun()
     else:
         st.info("Aucun planning disponible.")
 
