@@ -2,6 +2,9 @@ import streamlit as st
 import calendar
 import datetime as dt
 
+# ✅ AJOUT CRITIQUE
+from firebase_client import save_forced_assignment, load_forced_assignments
+
 
 def availability_calendar(
     *,
@@ -19,6 +22,11 @@ def availability_calendar(
     - Utilisateur : saisie simple
     - Admin : saisie + forçage + annulation forçage
     """
+
+    # ==================================================
+    # 🔒 SYNC FORÇAGES DEPUIS FIRESTORE (CRITIQUE)
+    # ==================================================
+    forced_assignments.update(load_forced_assignments(year, month))
 
     session_key = f"availability_{email}_{year}_{month}"
 
@@ -121,7 +129,7 @@ def availability_calendar(
             )
 
     # --------------------------------------------------
-    # 🧷 FORÇAGE ADMIN (UX-1)
+    # 🧷 FORÇAGE ADMIN (PERSISTANT)
     # --------------------------------------------------
     if is_admin:
         st.divider()
@@ -150,20 +158,22 @@ def availability_calendar(
 
         day_key = forced_day.isoformat()
 
-        # ➕ FORCER
+        # ➕ FORCER (🔥 PERSISTÉ)
         if c3.button("🔒 Forcer", key=f"force-btn-{day_key}"):
             forced_assignments[day_key] = user_labels[forced_label]
+            save_forced_assignment(year, month, day_key, user_labels[forced_label])
             st.success(
                 f"{forced_day.strftime('%d/%m')} forcé pour {forced_label}"
             )
 
-        # ➖ ANNULER
+        # ➖ ANNULER (🔥 PERSISTÉ)
         if day_key in forced_assignments:
             if st.button(
                 "🗑 Annuler le forçage",
                 key=f"unforce-{day_key}",
             ):
                 forced_assignments.pop(day_key, None)
+                save_forced_assignment(year, month, day_key, None)
                 st.success(
                     f"Forçage annulé pour le {forced_day.strftime('%d/%m')}"
                 )
