@@ -107,7 +107,7 @@ def _solve_once(
         return False
 
     def violates_hours(u, block_days):
-        projected = hours_by_user[u] + len(block_days) * 10
+        projected = hours_by_user[u] + len(block_days) * 9
         max_hours = target_hours[u] * (1 + tolerance)
 
         if projected <= max_hours:
@@ -127,7 +127,7 @@ def _solve_once(
         block["assigned_to"] = u
         assigned_blocks.add(block["id"])
         assigned_by_user[u].add(block["id"])
-        hours_by_user[u] += len(block["days"]) * 10
+        hours_by_user[u] += len(block["days"]) * 9
 
     users_sorted = list(users)
     random.shuffle(users_sorted)
@@ -142,7 +142,7 @@ def _solve_once(
             if violates_consecutive(u, block):
                 continue
 
-            projected = hours_by_user[u] + len(block["days"]) * 10
+            projected = hours_by_user[u] + len(block["days"]) * 9
             max_hours = target_hours[u] * (1 + tolerance)
 
             if projected > max_hours:
@@ -167,7 +167,7 @@ def _solve_once(
             if violates_consecutive(u, block):
                 continue
 
-            projected = hours_by_user[u] + len(block["days"]) * 10
+            projected = hours_by_user[u] + len(block["days"]) * 9
             max_hours = target_hours[u] * (1 + tolerance)
 
             if projected > max_hours:
