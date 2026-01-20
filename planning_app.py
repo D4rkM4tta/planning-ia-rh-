@@ -38,7 +38,7 @@ def compute_hours(planning_blocks):
             continue
         stats.setdefault(user, {"days": 0, "hours": 0})
         stats[user]["days"] += len(block["days"])
-        stats[user]["hours"] += len(block["days"]) * 10
+        stats[user]["hours"] += len(block["days"]) * 9
     return stats
 
 
