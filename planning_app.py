@@ -17,6 +17,10 @@ from firebase_client import (
 
 from components.calendar_availability import availability_calendar
 from planner_engine import generate_planning
+from planning_exports import (
+    export_planning_excel_calendar_colored,
+)
+from planning_exports import export_planning_ical
 
 # ============================================================
 # CONFIG
@@ -73,7 +77,47 @@ def compute_rolling_12_months(year: int, month: int):
             rolling.setdefault(user, 0)
             rolling[user] += data["hours"]
     return rolling
+# ============================================================
+# ANALYSE RH — WEEKENDS & JOURS FÉRIÉS
+# ============================================================
+def compute_weekends_and_holidays(blocks, year: int, month: int):
+    import datetime as dt
 
+    # Jours fériés France fixes (suffisant pour ton besoin actuel)
+    FIXED_HOLIDAYS = {
+        dt.date(year, 1, 1),
+        dt.date(year, 5, 1),
+        dt.date(year, 5, 8),
+        dt.date(year, 7, 14),
+        dt.date(year, 8, 15),
+        dt.date(year, 11, 1),
+        dt.date(year, 11, 11),
+        dt.date(year, 12, 25),
+    }
+
+    weekends_count = {}
+    holidays_count = {}
+
+    for block in blocks:
+        user = block["assigned_to"]
+        if not user:
+            continue
+
+        for d in block["days"]:
+            day = dt.date.fromisoformat(d)
+
+            if day.year != year or day.month != month:
+                continue
+
+            # Week-end
+            if day.weekday() >= 5:
+                weekends_count[user] = weekends_count.get(user, 0) + 1
+
+            # Jour férié
+            if day in FIXED_HOLIDAYS:
+                holidays_count[user] = holidays_count.get(user, 0) + 1
+
+    return weekends_count, holidays_count
 # ============================================================
 # SESSION
 # ============================================================
@@ -279,7 +323,7 @@ with tab4:
     st.markdown("""
 <div style="background:#263238;color:white;padding:16px;border-radius:10px">
 <b>📜 Règles RH</b><br>
-- 1 jour = <b>10 heures</b><br>
+- 1 jour = <b>9 heures</b><br>
 - Pas de blocs consécutifs<br>
 - Disponibilités strictes<br>
 - Forçage admin prioritaire<br>
@@ -295,6 +339,13 @@ with tab5:
         monthly_stats = compute_hours(blocks)
         cumulative_stats = compute_cumulative_hours(year_v, month_v)
         rolling_stats = compute_rolling_12_months(year_v, month_v)
+
+        # ➕ NOUVEAU : compteurs RH
+        weekends_stats, holidays_stats = compute_weekends_and_holidays(
+            blocks,
+            year_v,
+            month_v,
+        )
 
         for user_email, user_info in users.items():
             if not admin and user_email != current_email:
@@ -326,6 +377,8 @@ with tab5:
 
 📄 **Contrat horaire mensuel** : {contract_hours} h  
 ⏱️ **Heures du mois** : {month_hours} h  
+🟪 **Week-ends effectués** : {weekends_stats.get(user_email, 0)}  
+🟥 **Jours fériés** : {holidays_stats.get(user_email, 0)}  
 📊 **Cumul année** : {corrected_cumulative} h  
 🔄 **Glissant 12 mois** : {corrected_rolling} h
 """,
@@ -348,16 +401,142 @@ with tab5:
         st.info("Aucun planning disponible.")
 
 # ============================================================
-# TAB 6 — PLANNING VALIDÉ
+# TAB 6 — PLANNINGS VERROUILLÉS
 # ============================================================
 with tab6:
-    year_l = st.selectbox("Année", [2026, 2027], index=0, key="locked_year")
-    month_l = st.selectbox("Mois", list(range(1, 13)), index=2, key="locked_month")
+    st.markdown("## 🔒 Plannings verrouillés")
 
-    proposals = load_planning_proposals(year_l, month_l)
-    proposal = proposals.get("current")
+    users = get_all_users()
+    found = False
 
-    if not proposal:
-        st.info("Aucun planning validé.")
-    else:
-        st.success("Planning validé — lecture seule")
+    for year_locked in [2026, 2027]:
+        for month_locked in range(1, 13):
+            proposals = load_planning_proposals(year_locked, month_locked)
+            proposal = proposals.get("current")
+
+            if not proposal:
+                continue
+
+            found = True
+            blocks = proposal["planning"]["blocks"]
+
+            st.markdown(
+                f"""
+                <div style="
+                    margin-top:24px;
+                    padding:12px;
+                    border-radius:14px;
+                    background:#263238;
+                    color:white;
+                ">
+                    <h3 style="margin-bottom:12px;">
+                        📅 {calendar.month_name[month_locked]} {year_locked}
+                    </h3>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            # ====================================================
+            # ➕ BOUTONS EXPORT (CORRIGÉ)
+            # ====================================================
+            col_a, col_b, _ = st.columns([2, 2, 6])
+
+            with col_a:
+                excel_buffer = export_planning_excel_calendar_colored(
+                    blocks=blocks,
+                    users=users,
+                    user_colors=user_colors,
+                    year=year_locked,
+                    month=month_locked,
+                )
+
+                st.download_button(
+                    label="📊 Export Excel",
+                    data=excel_buffer,
+                    file_name=f"planning_{year_locked}_{month_locked:02d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"excel_{year_locked}_{month_locked}",
+                )
+
+            with col_b:
+                ical_bytes = export_planning_ical(
+                    planning=proposal["planning"],
+                    users=users,
+                    year=year_locked,
+                    month=month_locked,
+                )
+
+                st.download_button(
+                    label="📆 Export iCal",
+                    data=ical_bytes,
+                    file_name=f"planning_{year_locked}_{month_locked:02d}.ics",
+                    mime="text/calendar",
+                    key=f"ical_{year_locked}_{month_locked}",
+                )
+            # ====================================================
+            # AFFICHAGE CALENDRIER (INCHANGÉ)
+            # ====================================================
+            cal = calendar.Calendar(firstweekday=0)
+            weeks = cal.monthdatescalendar(year_locked, month_locked)
+
+            COLORS = [
+                "#FB8C00", "#3949AB", "#00ACC1", "#8E24AA",
+                "#43A047", "#E53935", "#6D4C41", "#1E88E5"
+            ]
+            user_colors = {u: COLORS[i % len(COLORS)] for i, u in enumerate(users)}
+
+            day_map = {}
+            for blk in blocks:
+                cur = blk["start"]
+                while cur <= blk["end"]:
+                    if cur.month == month_locked:
+                        day_map[cur.isoformat()] = blk["assigned_to"]
+                    cur += dt.timedelta(days=1)
+
+            for week in weeks:
+                cols = st.columns(7)
+                for i, day in enumerate(week):
+                    if day.month != month_locked:
+                        cols[i].markdown(
+                            f"<div style='opacity:.3'>{day.day}</div>",
+                            unsafe_allow_html=True
+                        )
+                        continue
+
+                    assigned = day_map.get(day.isoformat())
+                    if assigned:
+                        cols[i].markdown(
+                            f"""
+                            <div style="
+                                background:{user_colors.get(assigned, '#546E7A')};
+                                color:white;
+                                border-radius:10px;
+                                padding:8px;
+                                text-align:center;
+                                font-size:12px;
+                            ">
+                                {day.day}<br>{users[assigned]['name']}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        cols[i].markdown(
+                            f"""
+                            <div style="
+                                border:2px dashed #757575;
+                                color:#757575;
+                                border-radius:10px;
+                                padding:8px;
+                                text-align:center;
+                                font-size:11px;
+                            ">
+                                {day.day}<br>—
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+
+    if not found:
+        st.info("Aucun planning verrouillé.")
