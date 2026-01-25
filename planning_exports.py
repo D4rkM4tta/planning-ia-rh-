@@ -115,3 +115,56 @@ def export_planning_excel_calendar_colored(
     workbook.close()
     buffer.seek(0)
     return buffer
+
+def export_planning_ical(planning: dict, users: dict, year: int, month: int):
+    """
+    Export iCal personnalisé :
+    - Un utilisateur voit uniquement SON planning
+    - Un admin voit tout le planning
+    """
+
+    import streamlit as st
+    from datetime import datetime, timedelta
+
+    current_user = st.session_state.auth_user["email"]
+    is_admin = users[current_user].get("admin", False)
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Planning IA RH//EN",
+    ]
+
+    for block in planning["blocks"]:
+        assigned = block.get("assigned_to")
+
+        # 🔥 Filtrage clé
+        if not is_admin and assigned != current_user:
+            continue
+
+        start = block["start"]
+        end = block["end"]
+
+        cur = start
+        while cur <= end:
+            if cur.year == year and cur.month == month:
+
+                dtstart = datetime.combine(cur, datetime.min.time()).strftime("%Y%m%d")
+                dtend = (datetime.combine(cur, datetime.min.time()) + timedelta(days=1)).strftime("%Y%m%d")
+
+                name = users[assigned]["name"]
+
+                lines.extend([
+                    "BEGIN:VEVENT",
+                    f"SUMMARY:Mondial IRE — {name}",
+                    f"DTSTART;VALUE=DATE:{dtstart}",
+                    f"DTEND;VALUE=DATE:{dtend}",
+                    "END:VEVENT",
+                ])
+
+            cur += timedelta(days=1)
+
+    lines.append("END:VCALENDAR")
+
+    ical_content = "\n".join(lines).encode("utf-8")
+    return ical_content
