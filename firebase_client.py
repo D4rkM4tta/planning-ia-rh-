@@ -1,5 +1,6 @@
 import datetime as dt
 import copy
+import requests
 import streamlit as st
 import firebase_admin
 
@@ -24,16 +25,49 @@ FORCED = db.collection("forced_assignments")
 # ============================================================
 # AUTH
 # ============================================================
-def login_user(email: str, _password: str | None = None) -> bool:
+def _verify_password_with_firebase(email: str, password: str) -> str | None:
+    """
+    Vérifie le mot de passe via l'API REST Firebase Auth
+    (signInWithPassword). Le SDK Admin ne peut PAS valider un
+    mot de passe : il faut passer par cette API.
+
+    Retourne l'uid si les identifiants sont valides, sinon None.
+    """
+    api_key = st.secrets["firebase_web_api_key"]
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:"
+        f"signInWithPassword?key={api_key}"
+    )
+    payload = {
+        "email": email,
+        "password": password,
+        "returnSecureToken": True,
+    }
+
     try:
-        user = auth.get_user_by_email(email)
-        st.session_state.auth_user = {
-            "uid": user.uid,
-            "email": email,
-        }
-        return True
-    except auth.UserNotFoundError:
+        response = requests.post(url, json=payload, timeout=10)
+    except requests.RequestException:
+        return None
+
+    if response.status_code != 200:
+        return None
+
+    return response.json().get("localId")
+
+
+def login_user(email: str, password: str | None = None) -> bool:
+    if not email or not password:
         return False
+
+    uid = _verify_password_with_firebase(email, password)
+    if uid is None:
+        return False
+
+    st.session_state.auth_user = {
+        "uid": uid,
+        "email": email,
+    }
+    return True
 
 
 def logout_user() -> None:
@@ -80,7 +114,9 @@ def save_forced_assignment(
 ) -> None:
     ref = FORCED.document(f"{year}_{month}")
     if email is None:
-        ref.update({day_iso: firestore.DELETE_FIELD})
+        # set(..., merge=True) fonctionne même si le document
+        # n'existe pas encore, contrairement à update().
+        ref.set({day_iso: firestore.DELETE_FIELD}, merge=True)
     else:
         ref.set({day_iso: email}, merge=True)
 

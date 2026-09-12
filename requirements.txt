@@ -5,3 +5,4 @@ icalendar
 firebase-admin
 google-cloud-firestore
 python-dateutil
+requests
