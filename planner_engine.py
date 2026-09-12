@@ -1,12 +1,14 @@
 # ============================================================
-# BASELINE SOLVEUR — NE PAS MODIFIER
+# BASELINE SOLVEUR V2 — AVEC FRAGMENTATION DE BLOCS
 # Version validée fonctionnellement (forçage + marges + équité)
-# Date : 2026-01
+# + Fragmentation automatique en cas de forçage partiel
+# Date : 2026-03
 # ============================================================
 import calendar
 import datetime as dt
 import random
 from collections import defaultdict
+
 
 # ============================================================
 # OUTILS
@@ -57,16 +59,102 @@ def month_blocks(year: int, month: int):
 
 
 # ============================================================
+# FRAGMENTATION DE BLOCS (NOUVEAU)
+# ============================================================
+
+def fragment_blocks_with_forced_assignments(blocks, forced_assignments):
+    """
+    Fragmente les blocs qui ont des forçages conflictuels
+    (plusieurs utilisateurs différents forcés sur le même bloc).
+
+    Retourne : (fragmented_blocks, error_message)
+    - fragmented_blocks : list de blocs (possiblement fragmentés)
+    - error_message : None si OK, sinon description du conflit irrésolvable
+    """
+
+    fragmented = []
+    next_id = max((b["id"] for b in blocks), default=0) + 1
+
+    for block in blocks:
+        # 🔍 Identifier les forçages sur ce bloc
+        forced_users_in_block = defaultdict(list)  # {user: [day1, day2, ...]}
+
+        for day_iso in block["days"]:
+            if day_iso in forced_assignments:
+                user = forced_assignments[day_iso]
+                forced_users_in_block[user].append(day_iso)
+
+        # ✅ Cas 1 : Aucun forçage → bloc intact
+        if not forced_users_in_block:
+            fragmented.append(block)
+            continue
+
+        # ✅ Cas 2 : Un seul utilisateur forcé → bloc intact
+        if len(forced_users_in_block) == 1:
+            fragmented.append(block)
+            continue
+
+        # 🔴 Cas 3 : FORÇAGES MULTIPLES → Fragmenter
+        # On fragmente par "plages continues de jours forcés à la même personne"
+        days_in_block = block["days"]
+
+        i = 0
+        while i < len(days_in_block):
+            day_iso = days_in_block[i]
+
+            # Chercher tous les jours consécutifs avec le même forçage (ou pas de forçage)
+            if day_iso in forced_assignments:
+                # C'est un jour forcé → fragmenter autour
+                user = forced_assignments[day_iso]
+
+                # Créer un bloc d'1 jour pour ce jour forcé
+                start_date = dt.date.fromisoformat(day_iso)
+                fragmented.append({
+                    "id": next_id,
+                    "type": f"{block['type']}_fragment",
+                    "start": start_date,
+                    "end": start_date,
+                    "days": [day_iso],
+                    "assigned_to": None,
+                })
+                next_id += 1
+                i += 1
+            else:
+                # Jour non-forcé → regrouper les jours consécutifs non-forcés
+                j = i
+                while j < len(days_in_block) and days_in_block[j] not in forced_assignments:
+                    j += 1
+
+                # Créer un bloc avec les jours [i:j]
+                days_slice = days_in_block[i:j]
+                start_date = dt.date.fromisoformat(days_slice[0])
+                end_date = dt.date.fromisoformat(days_slice[-1])
+
+                fragmented.append({
+                    "id": next_id,
+                    "type": f"{block['type']}_fragment",
+                    "start": start_date,
+                    "end": end_date,
+                    "days": days_slice,
+                    "assigned_to": None,
+                })
+                next_id += 1
+                i = j
+
+    return fragmented, None
+
+
+# ============================================================
 # SOLVEUR INTERNE
 # ============================================================
 
 def _solve_once(
-    blocks,
-    users,
-    availability_by_user,
-    forced_assignments,
-    target_hours,
-    tolerance=0.15,
+        blocks,
+        users,
+        availability_by_user,
+        forced_assignments,
+        target_hours,
+        tolerance=0.15,
 ):
     eligible = defaultdict(list)
     block_by_id = {b["id"]: b for b in blocks}
@@ -82,6 +170,7 @@ def _solve_once(
         if len(forced_users) == 1:
             forced_block_owner[block["id"]] = forced_users.pop()
         elif len(forced_users) > 1:
+            # ⚠️ Cela NE devrait JAMAIS arriver après fragmentation
             return None, -1
 
     # 🎯 Éligibilité
@@ -97,7 +186,7 @@ def _solve_once(
     assigned_by_user = defaultdict(set)
     hours_by_user = defaultdict(int)
     assigned_blocks = set()
-    overflow_used = defaultdict(bool)  # ⭐ NOUVEAU
+    overflow_used = defaultdict(bool)
 
     def violates_consecutive(u, block):
         for b_id in assigned_by_user[u]:
@@ -113,7 +202,6 @@ def _solve_once(
         if projected <= max_hours:
             return False
 
-        # ⭐ AUTORISATION UNIQUE DE DÉPASSEMENT
         if not overflow_used[u]:
             return False
 
@@ -189,13 +277,13 @@ def _solve_once(
 # ============================================================
 
 def generate_planning(
-    *,
-    year: int,
-    month: int,
-    users: dict,
-    availability_by_user: dict,
-    forced_assignments: dict,
-    attempts: int = 80,
+        *,
+        year: int,
+        month: int,
+        users: dict,
+        availability_by_user: dict,
+        forced_assignments: dict,
+        attempts: int = 80,
 ):
     target_hours = {
         u: int(data["monthly_hours"])
@@ -203,6 +291,19 @@ def generate_planning(
     }
 
     base_blocks = month_blocks(year, month)
+
+    # 🔥 FRAGMENTATION DES BLOCS (NOUVEAU)
+    base_blocks, frag_error = fragment_blocks_with_forced_assignments(
+        base_blocks,
+        forced_assignments
+    )
+
+    if frag_error:
+        return {
+            "blocks": [],
+            "warnings": [frag_error],
+        }
+
     best_blocks = None
     best_score = -1
 
