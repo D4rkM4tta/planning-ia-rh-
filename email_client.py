@@ -1,13 +1,14 @@
 import smtplib
 import ssl
-import toml
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# Chargement des identifiants sécurisés
-creds = toml.load(".email_credentials.toml")
-EMAIL_ADDRESS = creds["EMAIL_ADDRESS"]
-APP_PASSWORD = creds["APP_PASSWORD"]
+import streamlit as st
+
+# Chargement des identifiants depuis st.secrets (jamais commité)
+EMAIL_ADDRESS = st.secrets["email"]["address"]
+APP_PASSWORD = st.secrets["email"]["app_password"]
+
 
 def send_email(to_email, subject, html_content):
     """Envoie un email HTML sécurisé via SMTP Google."""
