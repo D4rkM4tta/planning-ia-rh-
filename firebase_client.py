@@ -22,6 +22,21 @@ USERS = db.collection("users")
 PROPOSALS = db.collection("planning_proposals")
 FORCED = db.collection("forced_assignments")
 
+
+# ============================================================
+# NORMALISATION DES EMAILS
+# ============================================================
+def normalize_email(email: str | None) -> str:
+    """
+    Firebase Auth ignore la casse des emails, mais les identifiants
+    de documents Firestore y sont sensibles : sans normalisation,
+    une connexion avec une majuscule crée un document distinct
+    (doublon d'utilisateur). Tous les accès Firestore passent par
+    cette fonction.
+    """
+    return (email or "").strip().lower()
+
+
 # ============================================================
 # AUTH
 # ============================================================
@@ -56,6 +71,8 @@ def _verify_password_with_firebase(email: str, password: str) -> str | None:
 
 
 def login_user(email: str, password: str | None = None) -> bool:
+    email = normalize_email(email)
+
     if not email or not password:
         return False
 
@@ -78,8 +95,16 @@ def is_admin() -> bool:
     user = st.session_state.get("auth_user")
     if not user:
         return False
-    doc = USERS.document(user["email"]).get()
-    return bool(doc.exists and doc.to_dict().get("admin", False))
+
+    doc = USERS.document(normalize_email(user["email"])).get()
+    if not doc.exists:
+        return False
+
+    data = doc.to_dict() or {}
+    # Deux conventions coexistent en base : un booléen `admin`
+    # et un champ texte `role`. On accepte les deux.
+    return bool(data.get("admin")) or data.get("role") == "admin"
+
 
 # ============================================================
 # USERS
@@ -98,22 +123,24 @@ def invalidate_users_cache() -> None:
     """À appeler après toute écriture sur un document utilisateur."""
     get_all_users.clear()
 
+
 # ============================================================
 # DISPONIBILITÉS
 # ============================================================
 def load_availability(email: str, year: int, month: int) -> dict:
-    doc = USERS.document(email).get()
+    doc = USERS.document(normalize_email(email)).get()
     if not doc.exists:
         return {}
     return doc.to_dict().get(f"availability_{year}_{month}", {})
 
 
 def save_availability(email: str, year: int, month: int, availability: dict) -> None:
-    USERS.document(email).set(
+    USERS.document(normalize_email(email)).set(
         {f"availability_{year}_{month}": availability},
         merge=True,
     )
     invalidate_users_cache()
+
 
 # ============================================================
 # FORÇAGE ADMIN
@@ -130,13 +157,14 @@ def save_forced_assignment(
         # n'existe pas encore, contrairement à update().
         ref.set({day_iso: firestore.DELETE_FIELD}, merge=True)
     else:
-        ref.set({day_iso: email}, merge=True)
+        ref.set({day_iso: normalize_email(email)}, merge=True)
 
 
 def load_forced_assignments(year: int, month: int) -> dict:
     ref = FORCED.document(f"{year}_{month}")
     doc = ref.get()
     return doc.to_dict() if doc.exists else {}
+
 
 # ============================================================
 # SERIALISATION PLANNING
@@ -163,6 +191,7 @@ def deserialize_planning(planning: dict) -> dict:
             block["end"] = dt.date.fromisoformat(block["end"])
     return planning
 
+
 # ============================================================
 # PLANNING UNIQUE
 # ============================================================
@@ -177,7 +206,7 @@ def save_planning_proposal(
     ref.set(
         {
             "planning": serialize_planning(planning),
-            "created_by": created_by,
+            "created_by": normalize_email(created_by),
             "created_at": dt.datetime.now(timezone.utc).isoformat(),
         },
         merge=True,
@@ -212,6 +241,7 @@ def invalidate_planning_cache() -> None:
     """À appeler après toute écriture sur un planning."""
     load_planning_proposals.clear()
 
+
 # ============================================================
 # VERROUILLAGE DU PLANNING (PERSISTANT)
 # ============================================================
@@ -231,7 +261,7 @@ def set_planning_lock(
     payload = {"locked": bool(locked)}
 
     if locked:
-        payload["locked_by"] = email
+        payload["locked_by"] = normalize_email(email)
         payload["locked_at"] = dt.datetime.now(timezone.utc).isoformat()
 
     ref.set(payload, merge=True)
@@ -243,6 +273,7 @@ def is_planning_locked(year: int, month: int) -> bool:
     proposal = proposals.get("current")
     return bool(proposal and proposal.get("locked"))
 
+
 # ============================================================
 # HEURES MENSUELLES (AJUSTABLES)
 # ============================================================
@@ -251,7 +282,7 @@ def load_monthly_hours(email: str, year: int, month: int) -> int | None:
     Retourne les heures mensuelles ajustées si elles existent,
     sinon None
     """
-    doc = USERS.document(email).get()
+    doc = USERS.document(normalize_email(email)).get()
     if not doc.exists:
         return None
 
@@ -262,7 +293,7 @@ def save_monthly_hours(email: str, year: int, month: int, hours: int) -> None:
     """
     Sauvegarde les heures mensuelles ajustées
     """
-    USERS.document(email).set(
+    USERS.document(normalize_email(email)).set(
         {f"hours_{year}_{month}": int(hours)},
         merge=True,
     )
@@ -274,11 +305,12 @@ def reset_monthly_hours(email: str, year: int, month: int) -> None:
     Supprime l'ajustement manuel : on repasse sur les heures
     calculées depuis le planning.
     """
-    USERS.document(email).set(
+    USERS.document(normalize_email(email)).set(
         {f"hours_{year}_{month}": firestore.DELETE_FIELD},
         merge=True,
     )
     invalidate_users_cache()
+
 
 # ============================================================
 # CORRECTION DU CUMUL ANNUEL (ADMIN)
@@ -289,7 +321,7 @@ def load_cumul_adjustment(email: str, year: int) -> int:
     au cumul annuel d'un collaborateur. Sert à intégrer un historique
     antérieur à l'application, ou à corriger un écart constaté.
     """
-    doc = USERS.document(email).get()
+    doc = USERS.document(normalize_email(email)).get()
     if not doc.exists:
         return 0
 
@@ -297,11 +329,12 @@ def load_cumul_adjustment(email: str, year: int) -> int:
 
 
 def save_cumul_adjustment(email: str, year: int, hours: int) -> None:
-    USERS.document(email).set(
+    USERS.document(normalize_email(email)).set(
         {f"cumul_adjustment_{year}": int(hours)},
         merge=True,
     )
     invalidate_users_cache()
+
 
 # ============================================================
 # HEURES RÉELLES (MOIS PAR MOIS)
@@ -311,7 +344,7 @@ def load_actual_month_hours(email: str, year: int, month: int) -> int | None:
     Heures réellement effectuées pour un utilisateur sur un mois donné
     (corrigées manuellement si besoin)
     """
-    doc = USERS.document(email).get()
+    doc = USERS.document(normalize_email(email)).get()
     if not doc.exists:
         return None
 
@@ -327,7 +360,7 @@ def save_actual_month_hours(
     """
     Sauvegarde des heures réellement effectuées pour un mois donné
     """
-    USERS.document(email).set(
+    USERS.document(normalize_email(email)).set(
         {f"actual_hours_{year}_{month}": int(hours)},
         merge=True,
     )

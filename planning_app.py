@@ -12,11 +12,6 @@ from firebase_client import (
     get_all_users,
     load_planning_proposals,
     save_planning_proposal,
-    load_monthly_hours,
-    save_monthly_hours,
-    reset_monthly_hours,
-    load_cumul_adjustment,
-    save_cumul_adjustment,
     set_planning_lock,
     is_planning_locked,
 )
@@ -27,7 +22,7 @@ from planning_exports import (
     export_planning_excel_calendar_colored,
 )
 from planning_exports import export_planning_ical
-from planning_stats import render_contract_vs_realized_chart
+from planning_stats import render_hours_dashboard
 
 # ============================================================
 # CONFIG
@@ -490,113 +485,36 @@ with tab5:
             + ", ".join(pending)
         )
 
-    monthly_stats = compute_hours(blocks_h)
     weekends_stats, holidays_stats = compute_weekends_and_holidays(
         blocks_h, year_h, month_h
     )
 
     st.divider()
 
-    # ----- Contrat vs Réalisé (mois analysé) -----
     status = "🔒 verrouillé" if month_is_locked else "✏️ non verrouillé"
     st.markdown(
-        f"#### 📊 Contrat vs réalisé — {month_label(month_h)} {year_h} "
-        f"*({status})*"
+        f"#### 📊 Synthèse — {month_label(month_h)} {year_h} *({status})*"
     )
 
-    if blocks_h:
-        render_contract_vs_realized_chart(
-            users=users,
-            blocks=blocks_h,
-            year=year_h,
-            month=month_h,
-        )
-    else:
+    if not blocks_h:
         st.info(
-            f"Aucun planning généré pour {month_label(month_h)} {year_h}."
+            f"Aucun planning généré pour {month_label(month_h)} {year_h}. "
+            "Les colonnes du mois seront à zéro."
         )
 
-    st.divider()
-    st.markdown(f"#### 👥 Détail par collaborateur — {month_label(month_h)} {year_h}")
-
-    for user_email, user_info in users.items():
-        if not admin and user_email != current_email:
-            continue
-
-        contract_hours = int(user_info.get("monthly_hours") or 0)
-        computed_hours = monthly_stats.get(user_email, {}).get("hours", 0)
-        override = user_info.get(f"hours_{year_h}_{month_h}")
-        month_hours = int(override) if override is not None else computed_hours
-
-        adjustment = int(user_info.get(f"cumul_adjustment_{year_h}") or 0)
-        ref_total = cumul_locked.get(user_email, 0) + adjustment
-        preview_total = cumul_preview.get(user_email, 0) + adjustment
-
-        col_left, col_right = st.columns([3, 2])
-
-        with col_left:
-            badge = " *(ajusté)*" if override is not None else ""
-            st.markdown(
-                f"""
-**{user_info.get('name', user_email)}**
-
-📄 **Contrat horaire mensuel** : {contract_hours} h  
-⏱️ **Heures de {month_label(month_h)}** : {month_hours} h{badge}  
-🟪 **Week-ends effectués** : {weekends_stats.get(user_email, 0)}  
-🟥 **Jours fériés** : {holidays_stats.get(user_email, 0)}  
-📊 **Cumul validé {year_h}** : **{ref_total} h**  
-🔎 **Aperçu (non verrouillé inclus)** : {preview_total} h  
-{f"➕ *dont correction manuelle : {adjustment:+d} h*" if adjustment else ""}
-""",
-            )
-
-        with col_right:
-            if not admin:
-                st.caption("Seul un administrateur peut modifier ces compteurs.")
-                st.divider()
-                continue
-
-            # ----- Ajustement du mois -----
-            new_hours = st.number_input(
-                f"Heures de {month_label(month_h)}",
-                min_value=0,
-                max_value=400,
-                step=1,
-                value=int(month_hours),
-                key=f"hours_{user_email}_{year_h}_{month_h}",
-            )
-
-            c1, c2 = st.columns(2)
-
-            if c1.button("💾 Mois", key=f"save_month_{user_email}_{year_h}_{month_h}"):
-                save_monthly_hours(user_email, year_h, month_h, int(new_hours))
-                st.rerun()
-
-            if override is not None:
-                if c2.button("↩︎ Auto", key=f"reset_month_{user_email}_{year_h}_{month_h}"):
-                    reset_monthly_hours(user_email, year_h, month_h)
-                    st.rerun()
-
-            # ----- Correction du cumul annuel -----
-            new_adjustment = st.number_input(
-                f"Correction cumul {year_h} (h)",
-                min_value=-2000,
-                max_value=2000,
-                step=1,
-                value=adjustment,
-                key=f"cumul_{user_email}_{year_h}",
-                help=(
-                    "Ajout ou retrait appliqué au cumul annuel. "
-                    "Sert à intégrer un historique antérieur à l'application "
-                    "ou à corriger un écart constaté."
-                ),
-            )
-
-            if st.button("💾 Cumul", key=f"save_cumul_{user_email}_{year_h}"):
-                save_cumul_adjustment(user_email, year_h, int(new_adjustment))
-                st.rerun()
-
-        st.divider()
+    render_hours_dashboard(
+        users=users,
+        blocks=blocks_h,
+        year=year_h,
+        month=month_h,
+        month_label=month_label(month_h),
+        weekends_stats=weekends_stats,
+        holidays_stats=holidays_stats,
+        cumul_locked=cumul_locked,
+        cumul_preview=cumul_preview,
+        admin=admin,
+        current_email=current_email,
+    )
 
 # ============================================================
 # TAB 6 — PLANNINGS VERROUILLÉS
