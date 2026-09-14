@@ -24,7 +24,6 @@ from theme import (
     inject_css,
     user_theme,
     esc,
-    abbrev,
     CARD,
     TEXT,
     TEXT_SOFT,
@@ -60,10 +59,7 @@ MONTH_LABELS = {
     9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
 }
 
-DOW = [
-    ("Lun", "L"), ("Mar", "M"), ("Mer", "M"), ("Jeu", "J"),
-    ("Ven", "V"), ("Sam", "S"), ("Dim", "D"),
-]
+DOW = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
 
 
 # ============================================================
@@ -190,19 +186,12 @@ def build_day_map(blocks, year: int, month: int) -> dict:
 def render_calendar(*, users, theme, day_map, year, month,
                     uncovered_label="Non couvert", show_legend=True,
                     show_stats=True):
-    """
-    Calendrier mensuel en une seule injection HTML.
-    Chaque case porte le prénom complet et sa version tronquée :
-    le CSS n'en affiche qu'une selon la largeur de l'écran.
-    """
+    """Calendrier mensuel en une seule injection HTML."""
     cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(year, month)
 
     parts = ['<div class="pl-grid">']
-    parts += [
-        f'<div class="pl-dow">{full}<span class="pl-dow-s">{sh}</span></div>'
-        for full, sh in DOW
-    ]
+    parts += [f'<div class="pl-dow">{d}</div>' for d in DOW]
     parts.append("</div>")
     parts.append('<div class="pl-grid">')
 
@@ -224,13 +213,11 @@ def render_calendar(*, users, theme, day_map, year, month,
                 covered += 1
                 c = theme.get(assigned, {"bg": "#D3D1C7", "fg": "#2C2C2A",
                                          "dim": "#5F5E5A"})
-                full = short_name(users, assigned)
                 parts.append(
                     f'<div class="pl-cell" style="background:{c["bg"]}">'
                     f'<div class="pl-num" style="color:{c["dim"]}">{day.day}</div>'
-                    f'<div class="pl-name" style="color:{c["fg"]}">{esc(full)}'
-                    f'<span class="pl-name-s">{esc(abbrev(full))}</span>'
-                    f'</div></div>'
+                    f'<div class="pl-name" style="color:{c["fg"]}">'
+                    f'{esc(short_name(users, assigned))}</div></div>'
                 )
             else:
                 parts.append(
@@ -238,8 +225,7 @@ def render_calendar(*, users, theme, day_map, year, month,
                     f'border:1.5px dashed {DANGER_LINE}">'
                     f'<div class="pl-num" style="color:{DANGER_FG}">{day.day}</div>'
                     f'<div class="pl-name" style="color:{DANGER_FG}">'
-                    f'{uncovered_label}<span class="pl-name-s">—</span>'
-                    f'</div></div>'
+                    f'{uncovered_label}</div></div>'
                 )
 
     parts.append("</div>")
@@ -247,16 +233,14 @@ def render_calendar(*, users, theme, day_map, year, month,
     if show_legend:
         present = sorted({u for u in day_map.values() if u})
         if present:
-            chips = []
-            for u in present:
-                c = theme.get(u, {})
-                full = display_name(users, u)
-                chips.append(
-                    f'<span class="pl-chip" style="background:'
-                    f'{c.get("bg", "#D3D1C7")};color:{c.get("fg", "#2C2C2A")}">'
-                    f'{esc(abbrev(short_name(users, u)))} · {esc(full)}</span>'
-                )
-            parts.append(f'<div class="pl-legend">{"".join(chips)}</div>')
+            chips = "".join(
+                f'<span class="pl-chip" style="background:'
+                f'{theme.get(u, {}).get("bg", "#D3D1C7")};'
+                f'color:{theme.get(u, {}).get("fg", "#2C2C2A")}">'
+                f'{esc(display_name(users, u))}</span>'
+                for u in present
+            )
+            parts.append(f'<div class="pl-legend">{chips}</div>')
 
     if show_stats and total:
         rate = round(covered / total * 100)
@@ -302,8 +286,8 @@ st.session_state.setdefault("forced_assignments", {})
 # LOGIN
 # ============================================================
 def login_screen():
-    st.markdown("<div style='height:4vh'></div>", unsafe_allow_html=True)
-    left, mid, right = st.columns([1, 1.6, 1])
+    st.markdown("<div style='height:6vh'></div>", unsafe_allow_html=True)
+    left, mid, right = st.columns([1, 1.1, 1])
 
     with mid:
         st.markdown(
@@ -342,46 +326,46 @@ theme = user_theme(users)
 # ============================================================
 # BARRE SUPÉRIEURE
 # ============================================================
-head_left, head_right = st.columns([4, 1])
+head_left, head_right = st.columns([5, 1])
 
 with head_left:
     role_bg, role_fg = (WARN_BG, WARN_FG) if admin else (NEUTRAL_BG, NEUTRAL_FG)
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:10px;'
-        f'margin-bottom:2px;flex-wrap:wrap">'
-        f'<span style="font-size:18px;font-weight:500;color:{TEXT}">'
+        f'margin-bottom:2px">'
+        f'<span style="font-size:20px;font-weight:500;color:{TEXT}">'
         f'Planning IA RH</span>'
         f'<span class="pl-badge" style="background:{role_bg};color:{role_fg};'
         f'margin:0">{"Admin" if admin else "Collaborateur"}</span></div>'
-        f'<div style="font-size:12px;color:{TEXT_MUTED}">{esc(current_email)}</div>',
+        f'<div style="font-size:13px;color:{TEXT_MUTED}">{esc(current_email)}</div>',
         unsafe_allow_html=True,
     )
 
 with head_right:
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
     if st.button("Déconnexion", key="logout_btn", use_container_width=True):
         logout_user()
         st.rerun()
 
-st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
 # ============================================================
 # ONGLETS
 # ============================================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Disponibilités",
+    "Mes disponibilités",
     "Admin",
     "Planning",
-    "Règles",
+    "Règles RH",
     "Heures",
-    "Validés",
+    "Planning validé",
 ])
 
 # ============================================================
 # TAB 1 — DISPONIBILITÉS
 # ============================================================
 with tab1:
-    c1, c2 = st.columns(2)
+    c1, c2, _ = st.columns([1, 1, 3])
     year = c1.selectbox("Année", [2026, 2027], index=0, key="user_year")
     month = c2.selectbox("Mois", list(range(1, 13)), index=2,
                          format_func=month_label, key="user_month")
@@ -404,7 +388,7 @@ with tab2:
     if not admin:
         st.info("Onglet réservé aux administrateurs.")
     else:
-        c1, c2 = st.columns(2)
+        c1, c2, _ = st.columns([1, 1, 3])
         year_admin = c1.selectbox("Année", [2026, 2027], index=0,
                                   key="admin_year")
         month_admin = c2.selectbox("Mois", list(range(1, 13)), index=2,
@@ -426,10 +410,7 @@ with tab2:
         weeks = cal.monthdatescalendar(year_admin, month_admin)
 
         parts = ['<div class="pl-wrap"><div class="pl-grid">']
-        parts += [
-            f'<div class="pl-dow">{full}<span class="pl-dow-s">{sh}</span></div>'
-            for full, sh in DOW
-        ]
+        parts += [f'<div class="pl-dow">{d}</div>' for d in DOW]
         parts.append('</div><div class="pl-grid">')
 
         for week in weeks:
@@ -441,20 +422,13 @@ with tab2:
                     continue
 
                 available = dispo_by_day.get(day.isoformat(), [])
-                inner = ""
-                for u in available:
-                    c = theme.get(u, {})
-                    full = short_name(users, u)
-                    inner += (
-                        f'<div style="background:{c.get("bg", "#D3D1C7")};'
-                        f'color:{c.get("fg", "#2C2C2A")};'
-                        f'border-radius:5px;padding:1px 4px;margin-top:2px">'
-                        f'<span class="pl-name" style="font-size:10px;'
-                        f'margin:0;color:inherit">{esc(full)}'
-                        f'<span class="pl-name-s">{esc(abbrev(full))}</span>'
-                        f'</span></div>'
-                    )
-
+                inner = "".join(
+                    f'<div style="background:{theme.get(u, {}).get("bg", "#D3D1C7")};'
+                    f'color:{theme.get(u, {}).get("fg", "#2C2C2A")};'
+                    f'border-radius:5px;padding:1px 5px;margin-top:2px;'
+                    f'font-size:10px">{esc(short_name(users, u))}</div>'
+                    for u in available
+                )
                 parts.append(
                     f'<div class="pl-cell" style="background:{CARD};'
                     f'min-height:78px">'
@@ -469,36 +443,38 @@ with tab2:
 # TAB 3 — PLANNING
 # ============================================================
 with tab3:
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns([1, 1, 3])
     year_v = c1.selectbox("Année", [2026, 2027], index=0, key="view_year")
     month_v = c2.selectbox("Mois", list(range(1, 13)), index=2,
                            format_func=month_label, key="view_month")
 
     locked_v = is_planning_locked(year_v, month_v)
 
-    if admin and not locked_v:
-        if st.button("Générer le planning", key="generate_planning",
-                     type="primary"):
-            availability_by_user = {
-                u: normalize_availability(load_availability(u, year_v, month_v))
-                for u in users
-            }
+    with c3:
+        st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+        if admin and not locked_v:
+            if st.button("Générer le planning", key="generate_planning",
+                         type="primary"):
+                availability_by_user = {
+                    u: normalize_availability(load_availability(u, year_v, month_v))
+                    for u in users
+                }
 
-            planning = generate_planning(
-                year=year_v,
-                month=month_v,
-                users=users,
-                availability_by_user=availability_by_user,
-                forced_assignments=st.session_state.forced_assignments,
-            )
+                planning = generate_planning(
+                    year=year_v,
+                    month=month_v,
+                    users=users,
+                    availability_by_user=availability_by_user,
+                    forced_assignments=st.session_state.forced_assignments,
+                )
 
-            save_planning_proposal(year_v, month_v, "current",
-                                   planning, current_email)
+                save_planning_proposal(year_v, month_v, "current",
+                                       planning, current_email)
 
-            for warning in planning.get("warnings", []):
-                st.warning(warning)
+                for warning in planning.get("warnings", []):
+                    st.warning(warning)
 
-            st.rerun()
+                st.rerun()
 
     proposals = load_planning_proposals(year_v, month_v)
     proposal = proposals.get("current")
@@ -550,7 +526,7 @@ with tab4:
 <div class="pl-wrap" style="max-width:640px">
   <div style="font-size:16px;font-weight:500;margin-bottom:12px;color:{TEXT}">
     Règles RH</div>
-  <div style="font-size:14px;color:{TEXT_SOFT};line-height:1.9">
+  <div style="font-size:14px;color:{TEXT_SOFT};line-height:2">
     <div>Amplitude <b style="color:{TEXT};font-weight:500">9h → 19h</b>, soit
       <b style="color:{TEXT};font-weight:500">9 heures</b> comptabilisées
       (1 h de repas non comptée)</div>
@@ -568,7 +544,7 @@ with tab4:
 # TAB 5 — HEURES
 # ============================================================
 with tab5:
-    c1, c2 = st.columns(2)
+    c1, c2, _ = st.columns([1, 1, 3])
     year_h = c1.selectbox("Année", [2026, 2027], index=0, key="hours_year")
     month_h = c2.selectbox("Mois analysé", list(range(1, 13)),
                            index=dt.date.today().month - 1,
@@ -657,7 +633,7 @@ with tab6:
                 unsafe_allow_html=True,
             )
 
-            col_a, col_b = st.columns(2)
+            col_a, col_b, _ = st.columns([1.2, 1.2, 4])
 
             with col_a:
                 excel_buffer = export_planning_excel_calendar_colored(
@@ -668,7 +644,7 @@ with tab6:
                     month=month_locked,
                 )
                 st.download_button(
-                    label="Excel",
+                    label="Export Excel",
                     data=excel_buffer,
                     file_name=f"planning_{year_locked}_{month_locked:02d}.xlsx",
                     mime=("application/vnd.openxmlformats-officedocument"
@@ -685,7 +661,7 @@ with tab6:
                     month=month_locked,
                 )
                 st.download_button(
-                    label="iCal",
+                    label="Export iCal",
                     data=ical_bytes,
                     file_name=f"planning_{year_locked}_{month_locked:02d}.ics",
                     mime="text/calendar",
