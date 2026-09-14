@@ -3,6 +3,14 @@ import calendar
 from io import BytesIO
 import xlsxwriter
 
+# ============================================================
+# CONSTANTES RH
+# ============================================================
+# Amplitude de travail : 9h → 19h (1h de repas non comptabilisée)
+WORK_START_HOUR = 9
+WORK_END_HOUR = 19
+TIMEZONE = "Europe/Paris"
+
 
 def export_planning_excel_calendar_colored(
     *,
@@ -52,6 +60,16 @@ def export_planning_excel_calendar_colored(
             "text_wrap": True,
         })
 
+    # Style de repli si un utilisateur assigné n'a pas de couleur connue
+    fallback_fmt = workbook.add_format({
+        "bg_color": "#546E7A",
+        "font_color": "#FFFFFF",
+        "align": "center",
+        "valign": "vcenter",
+        "border": 1,
+        "text_wrap": True,
+    })
+
     uncovered_fmt = workbook.add_format({
         "border": 1,
         "align": "center",
@@ -73,6 +91,8 @@ def export_planning_excel_calendar_colored(
     day_map = {}
     for block in blocks:
         user = block["assigned_to"]
+        if not user:
+            continue
         for d in block["days"]:
             day = dt.date.fromisoformat(d)
             if day.year == year and day.month == month:
@@ -87,19 +107,19 @@ def export_planning_excel_calendar_colored(
     row = 1
     for week in weeks:
         for col, day in enumerate(week):
-            if day.month != month:
+            if day.month != month or day.year != year:
                 worksheet.write(row, col, "", empty_fmt)
                 continue
 
             user = day_map.get(day)
 
             if user:
-                name = users[user]["name"]
+                name = users.get(user, {}).get("name", user)
                 worksheet.write(
                     row,
                     col,
                     f"{day.day}\n{name}",
-                    user_formats[user],
+                    user_formats.get(user, fallback_fmt),
                 )
             else:
                 worksheet.write(
@@ -116,55 +136,76 @@ def export_planning_excel_calendar_colored(
     buffer.seek(0)
     return buffer
 
+
+def _escape_ical(text: str) -> str:
+    """Échappe les caractères spéciaux selon la RFC 5545."""
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+
+
 def export_planning_ical(planning: dict, users: dict, year: int, month: int):
     """
     Export iCal personnalisé :
     - Un utilisateur voit uniquement SON planning
     - Un admin voit tout le planning
+
+    Les événements couvrent l'amplitude réelle 9h → 19h (Europe/Paris).
     """
 
     import streamlit as st
-    from datetime import datetime, timedelta
+    from uuid import uuid4
 
-    current_user = st.session_state.auth_user["email"]
-    is_admin = users[current_user].get("admin", False)
+    auth_user = st.session_state.get("auth_user") or {}
+    current_user = auth_user.get("email")
+    is_admin = bool(users.get(current_user, {}).get("admin", False))
+
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//Planning IA RH//EN",
+        "CALSCALE:GREGORIAN",
     ]
 
-    for block in planning["blocks"]:
+    for block in planning.get("blocks", []):
         assigned = block.get("assigned_to")
+        if not assigned:
+            continue
 
-        # 🔥 Filtrage clé
+        # 🔥 Filtrage clé : un non-admin ne voit que son propre planning
         if not is_admin and assigned != current_user:
             continue
 
-        start = block["start"]
+        name = users.get(assigned, {}).get("name", assigned)
+
+        cur = block["start"]
         end = block["end"]
 
-        cur = start
         while cur <= end:
             if cur.year == year and cur.month == month:
-
-                dtstart = datetime.combine(cur, datetime.min.time()).strftime("%Y%m%d")
-                dtend = (datetime.combine(cur, datetime.min.time()) + timedelta(days=1)).strftime("%Y%m%d")
-
-                name = users[assigned]["name"]
+                start_dt = dt.datetime.combine(cur, dt.time(WORK_START_HOUR, 0))
+                end_dt = dt.datetime.combine(cur, dt.time(WORK_END_HOUR, 0))
 
                 lines.extend([
                     "BEGIN:VEVENT",
-                    f"SUMMARY:Mondial IRE — {name}",
-                    f"DTSTART;VALUE=DATE:{dtstart}",
-                    f"DTEND;VALUE=DATE:{dtend}",
+                    f"UID:{uuid4()}@planning-ia-rh",
+                    f"DTSTAMP:{stamp}",
+                    f"DTSTART;TZID={TIMEZONE}:{start_dt.strftime('%Y%m%dT%H%M%S')}",
+                    f"DTEND;TZID={TIMEZONE}:{end_dt.strftime('%Y%m%dT%H%M%S')}",
+                    f"SUMMARY:{_escape_ical(f'Mondial IRE — {name}')}",
+                    "DESCRIPTION:Amplitude 9h-19h (1h de repas non comptabilisée)",
                     "END:VEVENT",
                 ])
 
-            cur += timedelta(days=1)
+            cur += dt.timedelta(days=1)
 
     lines.append("END:VCALENDAR")
 
-    ical_content = "\n".join(lines).encode("utf-8")
-    return ical_content
+    # RFC 5545 : les lignes doivent être séparées par CRLF
+    return "\r\n".join(lines).encode("utf-8")
