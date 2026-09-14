@@ -182,9 +182,17 @@ def save_planning_proposal(
         },
         merge=True,
     )
+    invalidate_planning_cache()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_planning_proposals(year: int, month: int) -> dict:
+    """
+    Charge le planning d'un mois.
+    Mis en cache : les onglets Heures et Planning validé bouclent
+    sur 12 à 24 mois, ce qui ferait autant de lectures Firestore
+    à chaque clic sans cela.
+    """
     ref = PROPOSALS.document(f"{year}-{month:02d}")
     doc = ref.get()
 
@@ -196,7 +204,44 @@ def load_planning_proposals(year: int, month: int) -> dict:
         return {}
 
     data["planning"] = deserialize_planning(data["planning"])
+    data["locked"] = bool(data.get("locked", False))
     return {"current": data}
+
+
+def invalidate_planning_cache() -> None:
+    """À appeler après toute écriture sur un planning."""
+    load_planning_proposals.clear()
+
+# ============================================================
+# VERROUILLAGE DU PLANNING (PERSISTANT)
+# ============================================================
+def set_planning_lock(
+    year: int,
+    month: int,
+    locked: bool,
+    email: str | None = None,
+) -> None:
+    """
+    Verrouille ou déverrouille le planning d'un mois.
+    L'état est stocké dans Firestore (et non en session), afin
+    d'être partagé entre tous les utilisateurs et conservé
+    après rechargement de la page.
+    """
+    ref = PROPOSALS.document(f"{year}-{month:02d}")
+    payload = {"locked": bool(locked)}
+
+    if locked:
+        payload["locked_by"] = email
+        payload["locked_at"] = dt.datetime.now(timezone.utc).isoformat()
+
+    ref.set(payload, merge=True)
+    invalidate_planning_cache()
+
+
+def is_planning_locked(year: int, month: int) -> bool:
+    proposals = load_planning_proposals(year, month)
+    proposal = proposals.get("current")
+    return bool(proposal and proposal.get("locked"))
 
 # ============================================================
 # HEURES MENSUELLES (AJUSTABLES)
@@ -219,6 +264,41 @@ def save_monthly_hours(email: str, year: int, month: int, hours: int) -> None:
     """
     USERS.document(email).set(
         {f"hours_{year}_{month}": int(hours)},
+        merge=True,
+    )
+    invalidate_users_cache()
+
+
+def reset_monthly_hours(email: str, year: int, month: int) -> None:
+    """
+    Supprime l'ajustement manuel : on repasse sur les heures
+    calculées depuis le planning.
+    """
+    USERS.document(email).set(
+        {f"hours_{year}_{month}": firestore.DELETE_FIELD},
+        merge=True,
+    )
+    invalidate_users_cache()
+
+# ============================================================
+# CORRECTION DU CUMUL ANNUEL (ADMIN)
+# ============================================================
+def load_cumul_adjustment(email: str, year: int) -> int:
+    """
+    Correction manuelle (en heures, positive ou négative) appliquée
+    au cumul annuel d'un collaborateur. Sert à intégrer un historique
+    antérieur à l'application, ou à corriger un écart constaté.
+    """
+    doc = USERS.document(email).get()
+    if not doc.exists:
+        return 0
+
+    return int(doc.to_dict().get(f"cumul_adjustment_{year}") or 0)
+
+
+def save_cumul_adjustment(email: str, year: int, hours: int) -> None:
+    USERS.document(email).set(
+        {f"cumul_adjustment_{year}": int(hours)},
         merge=True,
     )
     invalidate_users_cache()

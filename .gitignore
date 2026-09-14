@@ -5,6 +5,10 @@
 __pycache__/
 *.pyc
 
+# macOS
+.DS_Store
+
 # Secrets
 firebase_key.json
 .streamlit/
+.email_credentials.toml
