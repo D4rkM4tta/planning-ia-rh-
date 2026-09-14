@@ -1,4 +1,3 @@
-import html
 import streamlit as st
 import calendar
 import datetime as dt
@@ -18,24 +17,41 @@ from firebase_client import (
 
 from components.calendar_availability import availability_calendar
 from planner_engine import generate_planning
-from planning_exports import (
-    export_planning_excel_calendar_colored,
-)
+from planning_exports import export_planning_excel_calendar_colored
 from planning_exports import export_planning_ical
 from planning_stats import render_hours_dashboard
+from theme import (
+    inject_css,
+    user_theme,
+    esc,
+    CARD,
+    TEXT,
+    TEXT_SOFT,
+    TEXT_MUTED,
+    DANGER_BG,
+    DANGER_FG,
+    DANGER_LINE,
+    OK_BG,
+    OK_FG,
+    WARN_BG,
+    WARN_FG,
+    NEUTRAL_BG,
+    NEUTRAL_FG,
+)
 
 # ============================================================
 # CONFIG
 # ============================================================
-st.set_page_config(page_title="Planning IA RH", layout="wide")
+st.set_page_config(
+    page_title="Planning IA RH",
+    page_icon="📅",
+    layout="wide",
+)
+
+inject_css()
 
 # Amplitude 9h → 19h, 1h de repas non comptabilisée
 HOURS_PER_DAY = 9
-
-COLORS = [
-    "#FB8C00", "#3949AB", "#00ACC1", "#8E24AA",
-    "#43A047", "#E53935", "#6D4C41", "#1E88E5"
-]
 
 MONTH_LABELS = {
     1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
@@ -43,20 +59,14 @@ MONTH_LABELS = {
     9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
 }
 
+DOW = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+
+
 # ============================================================
 # UTILITAIRES
 # ============================================================
-def esc(value) -> str:
-    """Échappe une valeur avant injection dans du HTML."""
-    return html.escape(str(value if value is not None else ""))
-
-
 def month_label(month: int) -> str:
     return MONTH_LABELS.get(month, str(month))
-
-
-def build_user_colors(users: dict) -> dict:
-    return {u: COLORS[i % len(COLORS)] for i, u in enumerate(users)}
 
 
 def display_name(users: dict, email: str) -> str:
@@ -64,6 +74,11 @@ def display_name(users: dict, email: str) -> str:
     if not email:
         return "—"
     return users.get(email, {}).get("name") or email.split("@")[0]
+
+
+def short_name(users: dict, email: str) -> str:
+    """Prénom seul, pour tenir dans une cellule de calendrier."""
+    return display_name(users, email).split(" ")[0]
 
 
 def normalize_availability(raw: dict) -> dict:
@@ -84,10 +99,6 @@ def compute_hours(planning_blocks):
 
 def month_hours_for_user(users: dict, user_email: str, year: int, month: int,
                          computed_hours: int) -> int:
-    """
-    Heures retenues pour un mois : l'ajustement manuel admin s'il
-    existe, sinon les heures calculées depuis le planning.
-    """
     override = users.get(user_email, {}).get(f"hours_{year}_{month}")
     return int(override) if override is not None else int(computed_hours)
 
@@ -96,14 +107,7 @@ def compute_year_cumulative(users: dict, year: int, up_to_month: int,
                             only_locked: bool):
     """
     Cumul annuel par collaborateur, de janvier jusqu'au mois demandé.
-
-    only_locked=True  → ne compte que les plannings verrouillés
-                        (chiffre de référence, figé)
-    only_locked=False → compte aussi les plannings générés non
-                        verrouillés (aperçu avant validation)
-
-    Les ajustements mensuels admin sont pris en compte.
-    Retourne (cumul_par_user, liste_des_mois_retenus).
+    only_locked=True → uniquement les plannings verrouillés.
     """
     cumulative = {}
     months_used = []
@@ -129,10 +133,6 @@ def compute_year_cumulative(users: dict, year: int, up_to_month: int,
 
 
 def last_locked_month(year: int) -> int | None:
-    """
-    Numéro du dernier mois verrouillé de l'année, indépendamment
-    du mois actuellement sélectionné.
-    """
     for m in range(12, 0, -1):
         proposals = load_planning_proposals(year, m)
         proposal = proposals.get("current")
@@ -141,20 +141,11 @@ def last_locked_month(year: int) -> int | None:
     return None
 
 
-# ============================================================
-# ANALYSE RH — WEEKENDS & JOURS FÉRIÉS
-# ============================================================
 def compute_weekends_and_holidays(blocks, year: int, month: int):
-    # Jours fériés France à date fixe
     FIXED_HOLIDAYS = {
-        dt.date(year, 1, 1),
-        dt.date(year, 5, 1),
-        dt.date(year, 5, 8),
-        dt.date(year, 7, 14),
-        dt.date(year, 8, 15),
-        dt.date(year, 11, 1),
-        dt.date(year, 11, 11),
-        dt.date(year, 12, 25),
+        dt.date(year, 1, 1), dt.date(year, 5, 1), dt.date(year, 5, 8),
+        dt.date(year, 7, 14), dt.date(year, 8, 15), dt.date(year, 11, 1),
+        dt.date(year, 11, 11), dt.date(year, 12, 25),
     }
 
     weekends_count = {}
@@ -164,20 +155,124 @@ def compute_weekends_and_holidays(blocks, year: int, month: int):
         user = block["assigned_to"]
         if not user:
             continue
-
         for d in block["days"]:
             day = dt.date.fromisoformat(d)
-
             if day.year != year or day.month != month:
                 continue
-
             if day.weekday() >= 5:
                 weekends_count[user] = weekends_count.get(user, 0) + 1
-
             if day in FIXED_HOLIDAYS:
                 holidays_count[user] = holidays_count.get(user, 0) + 1
 
     return weekends_count, holidays_count
+
+
+def build_day_map(blocks, year: int, month: int) -> dict:
+    day_map = {}
+    for block in blocks:
+        if not block.get("assigned_to"):
+            continue
+        cur = block["start"]
+        while cur <= block["end"]:
+            if cur.year == year and cur.month == month:
+                day_map[cur.isoformat()] = block["assigned_to"]
+            cur += dt.timedelta(days=1)
+    return day_map
+
+
+# ============================================================
+# RENDU DU CALENDRIER
+# ============================================================
+def render_calendar(*, users, theme, day_map, year, month,
+                    uncovered_label="Non couvert", show_legend=True,
+                    show_stats=True):
+    """Calendrier mensuel en une seule injection HTML."""
+    cal = calendar.Calendar(firstweekday=0)
+    weeks = cal.monthdatescalendar(year, month)
+
+    parts = ['<div class="pl-grid">']
+    parts += [f'<div class="pl-dow">{d}</div>' for d in DOW]
+    parts.append("</div>")
+    parts.append('<div class="pl-grid">')
+
+    covered = 0
+    total = 0
+
+    for week in weeks:
+        for day in week:
+            if day.year != year or day.month != month:
+                parts.append(
+                    f'<div class="pl-off"><div class="pl-num">{day.day}</div></div>'
+                )
+                continue
+
+            total += 1
+            assigned = day_map.get(day.isoformat())
+
+            if assigned:
+                covered += 1
+                c = theme.get(assigned, {"bg": "#D3D1C7", "fg": "#2C2C2A",
+                                         "dim": "#5F5E5A"})
+                parts.append(
+                    f'<div class="pl-cell" style="background:{c["bg"]}">'
+                    f'<div class="pl-num" style="color:{c["dim"]}">{day.day}</div>'
+                    f'<div class="pl-name" style="color:{c["fg"]}">'
+                    f'{esc(short_name(users, assigned))}</div></div>'
+                )
+            else:
+                parts.append(
+                    f'<div class="pl-cell" style="background:{DANGER_BG};'
+                    f'border:1.5px dashed {DANGER_LINE}">'
+                    f'<div class="pl-num" style="color:{DANGER_FG}">{day.day}</div>'
+                    f'<div class="pl-name" style="color:{DANGER_FG}">'
+                    f'{uncovered_label}</div></div>'
+                )
+
+    parts.append("</div>")
+
+    if show_legend:
+        present = sorted({u for u in day_map.values() if u})
+        if present:
+            chips = "".join(
+                f'<span class="pl-chip" style="background:'
+                f'{theme.get(u, {}).get("bg", "#D3D1C7")};'
+                f'color:{theme.get(u, {}).get("fg", "#2C2C2A")}">'
+                f'{esc(display_name(users, u))}</span>'
+                for u in present
+            )
+            parts.append(f'<div class="pl-legend">{chips}</div>')
+
+    if show_stats and total:
+        rate = round(covered / total * 100)
+        hours = covered * HOURS_PER_DAY
+        missing = total - covered
+        miss_color = DANGER_FG if missing else TEXT
+        parts.append(
+            f'<div class="pl-stats">'
+            f'<div><div class="pl-stat-l">Couverture</div>'
+            f'<div class="pl-stat-v">{rate} %</div></div>'
+            f'<div><div class="pl-stat-l">Heures</div>'
+            f'<div class="pl-stat-v">{hours} h</div></div>'
+            f'<div><div class="pl-stat-l">Non couverts</div>'
+            f'<div class="pl-stat-v" style="color:{miss_color}">{missing} j</div></div>'
+            f'</div>'
+        )
+
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def month_header(title: str, badge: str | None = None,
+                 badge_bg: str = OK_BG, badge_fg: str = OK_FG):
+    chip = ""
+    if badge:
+        chip = (
+            f'<span class="pl-badge" style="background:{badge_bg};'
+            f'color:{badge_fg}">{esc(badge)}</span>'
+        )
+    st.markdown(
+        f'<div class="pl-head"><div class="pl-title">{esc(title)}{chip}</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -186,18 +281,37 @@ def compute_weekends_and_holidays(blocks, year: int, month: int):
 st.session_state.setdefault("auth_user", None)
 st.session_state.setdefault("forced_assignments", {})
 
+
 # ============================================================
 # LOGIN
 # ============================================================
 def login_screen():
-    st.title("🔐 Connexion Planning IA RH")
-    email = st.text_input("Email", key="login_email")
-    password = st.text_input("Mot de passe", type="password", key="login_pwd")
-    if st.button("Se connecter", key="login_btn"):
-        if login_user(email, password):
-            st.rerun()
-        else:
-            st.error("Identifiants incorrects")
+    st.markdown("<div style='height:6vh'></div>", unsafe_allow_html=True)
+    left, mid, right = st.columns([1, 1.1, 1])
+
+    with mid:
+        st.markdown(
+            f'<div style="width:46px;height:46px;border-radius:12px;'
+            f'background:#B5D4F4;display:flex;align-items:center;'
+            f'justify-content:center;font-size:23px;margin-bottom:14px">📅</div>'
+            f'<div style="font-size:20px;font-weight:500;color:{TEXT}">'
+            f'Planning IA RH</div>'
+            f'<div style="font-size:13px;color:{TEXT_SOFT};margin-bottom:18px">'
+            f'Connectez-vous pour accéder à vos plannings</div>',
+            unsafe_allow_html=True,
+        )
+
+        email = st.text_input("Email", key="login_email",
+                              placeholder="nom@exemple.fr")
+        password = st.text_input("Mot de passe", type="password",
+                                 key="login_pwd", placeholder="••••••••")
+
+        if st.button("Se connecter", key="login_btn",
+                     type="primary", use_container_width=True):
+            if login_user(email, password):
+                st.rerun()
+            else:
+                st.error("Identifiants incorrects")
 
 
 if not st.session_state.auth_user:
@@ -207,38 +321,54 @@ if not st.session_state.auth_user:
 current_email = st.session_state.auth_user["email"]
 admin = is_admin()
 users = get_all_users()
-user_colors = build_user_colors(users)
+theme = user_theme(users)
 
-st.success(f"Connecté : **{current_email}** — {'Admin' if admin else 'Utilisateur'}")
+# ============================================================
+# BARRE SUPÉRIEURE
+# ============================================================
+head_left, head_right = st.columns([5, 1])
 
-if st.button("Se déconnecter", key="logout_btn"):
-    logout_user()
-    st.rerun()
+with head_left:
+    role_bg, role_fg = (WARN_BG, WARN_FG) if admin else (NEUTRAL_BG, NEUTRAL_FG)
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:10px;'
+        f'margin-bottom:2px">'
+        f'<span style="font-size:20px;font-weight:500;color:{TEXT}">'
+        f'Planning IA RH</span>'
+        f'<span class="pl-badge" style="background:{role_bg};color:{role_fg};'
+        f'margin:0">{"Admin" if admin else "Collaborateur"}</span></div>'
+        f'<div style="font-size:13px;color:{TEXT_MUTED}">{esc(current_email)}</div>',
+        unsafe_allow_html=True,
+    )
+
+with head_right:
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    if st.button("Déconnexion", key="logout_btn", use_container_width=True):
+        logout_user()
+        st.rerun()
+
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
 # ============================================================
 # ONGLETS
 # ============================================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📌 Mes disponibilités",
-    "📋 Admin",
-    "📅 Planning",
-    "📜 Règles RH",
-    "⏱️ Heures",
-    "🔒 Planning validé",
+    "Mes disponibilités",
+    "Admin",
+    "Planning",
+    "Règles RH",
+    "Heures",
+    "Planning validé",
 ])
 
 # ============================================================
 # TAB 1 — DISPONIBILITÉS
 # ============================================================
 with tab1:
-    year = st.selectbox("Année", [2026, 2027], index=0, key="user_year")
-    month = st.selectbox(
-        "Mois",
-        list(range(1, 13)),
-        index=2,
-        format_func=month_label,
-        key="user_month",
-    )
+    c1, c2, _ = st.columns([1, 1, 3])
+    year = c1.selectbox("Année", [2026, 2027], index=0, key="user_year")
+    month = c2.selectbox("Mois", list(range(1, 13)), index=2,
+                         format_func=month_label, key="user_month")
 
     availability_calendar(
         email=current_email,
@@ -252,210 +382,179 @@ with tab1:
     )
 
 # ============================================================
-# TAB 2 — ADMIN
+# TAB 2 — ADMIN (disponibilités croisées)
 # ============================================================
 with tab2:
     if not admin:
-        st.info("🔒 Onglet réservé aux administrateurs.")
+        st.info("Onglet réservé aux administrateurs.")
     else:
-        year_admin = st.selectbox("Année", [2026, 2027], index=0, key="admin_year")
-        month_admin = st.selectbox(
-            "Mois",
-            list(range(1, 13)),
-            index=2,
-            format_func=month_label,
-            key="admin_month",
-        )
+        c1, c2, _ = st.columns([1, 1, 3])
+        year_admin = c1.selectbox("Année", [2026, 2027], index=0,
+                                  key="admin_year")
+        month_admin = c2.selectbox("Mois", list(range(1, 13)), index=2,
+                                   format_func=month_label, key="admin_month")
 
         availability_by_user = {
             u: normalize_availability(load_availability(u, year_admin, month_admin))
             for u in users
         }
 
-        cal = calendar.Calendar(firstweekday=0)
-        weeks = cal.monthdatescalendar(year_admin, month_admin)
-
         dispo_by_day = {}
         for u, days in availability_by_user.items():
             for d in days:
                 dispo_by_day.setdefault(d, []).append(u)
 
+        month_header(f"Disponibilités — {month_label(month_admin)} {year_admin}")
+
+        cal = calendar.Calendar(firstweekday=0)
+        weeks = cal.monthdatescalendar(year_admin, month_admin)
+
+        parts = ['<div class="pl-wrap"><div class="pl-grid">']
+        parts += [f'<div class="pl-dow">{d}</div>' for d in DOW]
+        parts.append('</div><div class="pl-grid">')
+
         for week in weeks:
-            cols = st.columns(7)
-            for i, day in enumerate(week):
-                if day.month != month_admin:
-                    cols[i].markdown(
-                        f"<div style='opacity:.3'>{day.day}</div>",
-                        unsafe_allow_html=True,
+            for day in week:
+                if day.month != month_admin or day.year != year_admin:
+                    parts.append(
+                        f'<div class="pl-off"><div class="pl-num">{day.day}</div></div>'
                     )
                     continue
 
+                available = dispo_by_day.get(day.isoformat(), [])
                 inner = "".join(
-                    f"<div style='background:{user_colors.get(u, '#546E7A')};color:white;"
-                    f"border-radius:6px;padding:2px 6px;margin:2px 0;"
-                    f"font-size:11px;text-align:center;'>"
-                    f"{esc(display_name(users, u))}</div>"
-                    for u in dispo_by_day.get(day.isoformat(), [])
+                    f'<div style="background:{theme.get(u, {}).get("bg", "#D3D1C7")};'
+                    f'color:{theme.get(u, {}).get("fg", "#2C2C2A")};'
+                    f'border-radius:5px;padding:1px 5px;margin-top:2px;'
+                    f'font-size:10px">{esc(short_name(users, u))}</div>'
+                    for u in available
+                )
+                parts.append(
+                    f'<div class="pl-cell" style="background:{CARD};'
+                    f'min-height:78px">'
+                    f'<div class="pl-num" style="color:{TEXT_MUTED}">{day.day}</div>'
+                    f'{inner}</div>'
                 )
 
-                cols[i].markdown(
-                    f"<div style='min-height:90px;background:#ECEFF1;border-radius:8px;padding:6px'>"
-                    f"<strong>{day.day}</strong>{inner}</div>",
-                    unsafe_allow_html=True
-                )
+        parts.append("</div></div>")
+        st.markdown("".join(parts), unsafe_allow_html=True)
 
 # ============================================================
 # TAB 3 — PLANNING
 # ============================================================
 with tab3:
-    year_v = st.selectbox("Année", [2026, 2027], index=0, key="view_year")
-    month_v = st.selectbox(
-        "Mois",
-        list(range(1, 13)),
-        index=2,
-        format_func=month_label,
-        key="view_month",
-    )
+    c1, c2, c3 = st.columns([1, 1, 3])
+    year_v = c1.selectbox("Année", [2026, 2027], index=0, key="view_year")
+    month_v = c2.selectbox("Mois", list(range(1, 13)), index=2,
+                           format_func=month_label, key="view_month")
 
     locked_v = is_planning_locked(year_v, month_v)
 
-    if admin and not locked_v:
-        if st.button("🚀 Générer / Régénérer le planning", key="generate_planning"):
-            availability_by_user = {
-                u: normalize_availability(load_availability(u, year_v, month_v))
-                for u in users
-            }
+    with c3:
+        st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+        if admin and not locked_v:
+            if st.button("Générer le planning", key="generate_planning",
+                         type="primary"):
+                availability_by_user = {
+                    u: normalize_availability(load_availability(u, year_v, month_v))
+                    for u in users
+                }
 
-            planning = generate_planning(
-                year=year_v,
-                month=month_v,
-                users=users,
-                availability_by_user=availability_by_user,
-                forced_assignments=st.session_state.forced_assignments,
-            )
+                planning = generate_planning(
+                    year=year_v,
+                    month=month_v,
+                    users=users,
+                    availability_by_user=availability_by_user,
+                    forced_assignments=st.session_state.forced_assignments,
+                )
 
-            save_planning_proposal(year_v, month_v, "current", planning, current_email)
+                save_planning_proposal(year_v, month_v, "current",
+                                       planning, current_email)
 
-            for warning in planning.get("warnings", []):
-                st.warning(warning)
+                for warning in planning.get("warnings", []):
+                    st.warning(warning)
 
-            st.success("✅ Planning généré")
-            st.rerun()
+                st.rerun()
 
     proposals = load_planning_proposals(year_v, month_v)
     proposal = proposals.get("current")
 
+    if locked_v:
+        month_header(f"{month_label(month_v)} {year_v}", "Verrouillé")
+    elif proposal:
+        month_header(f"{month_label(month_v)} {year_v}", "Brouillon",
+                     NEUTRAL_BG, NEUTRAL_FG)
+    else:
+        month_header(f"{month_label(month_v)} {year_v}")
+
     if not proposal:
-        st.info("Aucun planning généré.")
+        st.info("Aucun planning généré pour ce mois.")
     else:
         blocks = proposal["planning"]["blocks"]
+        day_map = build_day_map(blocks, year_v, month_v)
 
-        cal = calendar.Calendar(firstweekday=0)
-        weeks = cal.monthdatescalendar(year_v, month_v)
+        st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
+        render_calendar(users=users, theme=theme, day_map=day_map,
+                        year=year_v, month=month_v)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        day_map = {}
-        for block in blocks:
-            if not block["assigned_to"]:
-                continue
-            cur = block["start"]
-            while cur <= block["end"]:
-                if cur.month == month_v and cur.year == year_v:
-                    day_map[cur.isoformat()] = block["assigned_to"]
-                cur += dt.timedelta(days=1)
-
-        for week in weeks:
-            cols = st.columns(7)
-            for i, day in enumerate(week):
-                if day.month != month_v:
-                    cols[i].markdown(
-                        f"<div style='opacity:.3'>{day.day}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    continue
-
-                assigned = day_map.get(day.isoformat())
-                if assigned:
-                    cols[i].markdown(
-                        f"<div style='background:{user_colors.get(assigned, '#546E7A')};"
-                        f"color:white;border-radius:10px;padding:8px;text-align:center;"
-                        f"font-size:12px'>"
-                        f"{day.day}<br>{esc(display_name(users, assigned))}</div>",
-                        unsafe_allow_html=True
-                    )
-                else:
-                    cols[i].markdown(
-                        f"<div style='border:2px dashed #D32F2F;color:#B71C1C;"
-                        f"border-radius:10px;padding:8px;text-align:center;font-size:11px'>"
-                        f"{day.day}<br>NON COUVERT</div>",
-                        unsafe_allow_html=True
-                    )
-
-    # --------------------------------------------------------
-    # VERROUILLAGE (PERSISTANT EN BASE)
-    # --------------------------------------------------------
-    if admin and proposal:
-        st.divider()
-        if not locked_v:
-            st.caption(
-                "Une fois verrouillé, ce planning ne peut plus être régénéré "
-                "et ses heures entrent dans le cumul annuel de référence."
-            )
-            if st.button("🔒 Verrouiller le planning", key="lock_planning"):
-                set_planning_lock(year_v, month_v, True, current_email)
-                st.rerun()
-        else:
-            locked_by = proposal.get("locked_by") or "—"
-            locked_at = (proposal.get("locked_at") or "")[:10]
-            st.success(f"🔒 Planning verrouillé par {locked_by} le {locked_at}")
-
-            if st.button("🔓 Déverrouiller", key="unlock_planning"):
-                set_planning_lock(year_v, month_v, False)
-                st.rerun()
+        if admin:
+            st.markdown("<div style='height:14px'></div>",
+                        unsafe_allow_html=True)
+            if not locked_v:
+                st.caption(
+                    "Une fois verrouillé, ce planning ne peut plus être "
+                    "régénéré et ses heures entrent dans le cumul annuel."
+                )
+                if st.button("Verrouiller le planning", key="lock_planning"):
+                    set_planning_lock(year_v, month_v, True, current_email)
+                    st.rerun()
+            else:
+                locked_by = proposal.get("locked_by") or "—"
+                locked_at = (proposal.get("locked_at") or "")[:10]
+                st.caption(f"Verrouillé par {locked_by} le {locked_at}")
+                if st.button("Déverrouiller", key="unlock_planning"):
+                    set_planning_lock(year_v, month_v, False)
+                    st.rerun()
 
 # ============================================================
 # TAB 4 — RÈGLES RH
 # ============================================================
 with tab4:
-    st.markdown("""
-<div style="background:#263238;color:white;padding:16px;border-radius:10px">
-<b>📜 Règles RH</b><br>
-- Amplitude <b>9h → 19h</b>, soit <b>9 heures</b> comptabilisées (1h de repas non comptée)<br>
-- Pas de blocs consécutifs<br>
-- Disponibilités strictes<br>
-- Forçage admin prioritaire<br>
-- Tous les collaborateurs doivent apparaître
+    st.markdown(
+        f"""
+<div class="pl-wrap" style="max-width:640px">
+  <div style="font-size:16px;font-weight:500;margin-bottom:12px;color:{TEXT}">
+    Règles RH</div>
+  <div style="font-size:14px;color:{TEXT_SOFT};line-height:2">
+    <div>Amplitude <b style="color:{TEXT};font-weight:500">9h → 19h</b>, soit
+      <b style="color:{TEXT};font-weight:500">9 heures</b> comptabilisées
+      (1 h de repas non comptée)</div>
+    <div>Pas de blocs consécutifs pour un même collaborateur</div>
+    <div>Respect strict des disponibilités saisies</div>
+    <div>Le forçage administrateur est prioritaire</div>
+    <div>Tous les collaborateurs doivent apparaître au planning</div>
+  </div>
 </div>
-""", unsafe_allow_html=True)
+""",
+        unsafe_allow_html=True,
+    )
 
 # ============================================================
 # TAB 5 — HEURES
 # ============================================================
 with tab5:
-    # Sélecteurs propres à cet onglet : il est autonome et n'est
-    # plus piloté par le mois choisi dans l'onglet Planning.
-    col_y, col_m = st.columns(2)
-
-    year_h = col_y.selectbox(
-        "Année",
-        [2026, 2027],
-        index=0,
-        key="hours_year",
-    )
-    month_h = col_m.selectbox(
-        "Mois analysé",
-        list(range(1, 13)),
-        index=dt.date.today().month - 1,
-        format_func=month_label,
-        key="hours_month",
-    )
+    c1, c2, _ = st.columns([1, 1, 3])
+    year_h = c1.selectbox("Année", [2026, 2027], index=0, key="hours_year")
+    month_h = c2.selectbox("Mois analysé", list(range(1, 13)),
+                           index=dt.date.today().month - 1,
+                           format_func=month_label, key="hours_month")
 
     proposals_h = load_planning_proposals(year_h, month_h)
     proposal_h = proposals_h.get("current")
     blocks_h = proposal_h["planning"]["blocks"] if proposal_h else []
     month_is_locked = bool(proposal_h and proposal_h.get("locked"))
 
-    # Le cumul se cale automatiquement sur le dernier mois verrouillé
-    # de l'année, indépendamment du mois analysé ci-dessus.
     ref_month = last_locked_month(year_h)
     cumul_up_to = ref_month or 12
 
@@ -466,48 +565,39 @@ with tab5:
         users, year_h, 12, only_locked=False
     )
 
-    if ref_month:
-        st.info(
-            f"📊 **Cumul de référence {year_h}** arrêté au "
-            f"**{month_label(ref_month)}** (dernier planning verrouillé) — "
-            f"{len(locked_months)} mois verrouillé(s)."
-        )
+    if month_is_locked:
+        month_header(f"Heures — {month_label(month_h)} {year_h}", "Verrouillé")
     else:
+        month_header(f"Heures — {month_label(month_h)} {year_h}",
+                     "Brouillon", NEUTRAL_BG, NEUTRAL_FG)
+
+    if not ref_month:
         st.warning(
             f"Aucun planning verrouillé en {year_h} : le cumul de référence "
             "est à 0. Les chiffres ci-dessous ne sont qu'un aperçu."
-        )
-
-    pending = [month_label(m) for m in preview_months if m not in locked_months]
-    if pending:
-        st.caption(
-            "🔎 Aperçu incluant les mois générés non verrouillés : "
-            + ", ".join(pending)
         )
 
     weekends_stats, holidays_stats = compute_weekends_and_holidays(
         blocks_h, year_h, month_h
     )
 
-    st.divider()
-
-    status = "🔒 verrouillé" if month_is_locked else "✏️ non verrouillé"
-    st.markdown(
-        f"#### 📊 Synthèse — {month_label(month_h)} {year_h} *({status})*"
-    )
-
     if not blocks_h:
         st.info(
             f"Aucun planning généré pour {month_label(month_h)} {year_h}. "
-            "Les colonnes du mois seront à zéro."
+            "Les colonnes du mois sont à zéro."
         )
 
     render_hours_dashboard(
         users=users,
+        theme=theme,
         blocks=blocks_h,
         year=year_h,
         month=month_h,
-        month_label=month_label(month_h),
+        month_name=month_label(month_h),
+        ref_month_name=month_label(ref_month) if ref_month else None,
+        locked_count=len(locked_months),
+        pending_months=[month_label(m) for m in preview_months
+                        if m not in locked_months],
         weekends_stats=weekends_stats,
         holidays_stats=holidays_stats,
         cumul_locked=cumul_locked,
@@ -520,8 +610,6 @@ with tab5:
 # TAB 6 — PLANNINGS VERROUILLÉS
 # ============================================================
 with tab6:
-    st.markdown("## 🔒 Plannings verrouillés")
-
     found = False
 
     for year_locked in [2026, 2027]:
@@ -534,44 +622,35 @@ with tab6:
 
             found = True
             blocks_l = proposal_l["planning"]["blocks"]
+            day_map_l = build_day_map(blocks_l, year_locked, month_locked)
 
             st.markdown(
-                f"""
-                <div style="
-                    margin-top:24px;
-                    padding:12px;
-                    border-radius:14px;
-                    background:#263238;
-                    color:white;
-                ">
-                    <h3 style="margin-bottom:12px;">
-                        📅 {month_label(month_locked)} {year_locked}
-                    </h3>
-                </div>
-                """,
-                unsafe_allow_html=True
+                f'<div class="pl-head" style="margin-top:22px">'
+                f'<div class="pl-title">{month_label(month_locked)} '
+                f'{year_locked}<span class="pl-badge" '
+                f'style="background:{OK_BG};color:{OK_FG}">Verrouillé</span>'
+                f'</div></div>',
+                unsafe_allow_html=True,
             )
 
-            # ====================================================
-            # BOUTONS EXPORT
-            # ====================================================
-            col_a, col_b, _ = st.columns([2, 2, 6])
+            col_a, col_b, _ = st.columns([1.2, 1.2, 4])
 
             with col_a:
                 excel_buffer = export_planning_excel_calendar_colored(
                     blocks=blocks_l,
                     users=users,
-                    user_colors=user_colors,
+                    user_colors={e: c["dot"] for e, c in theme.items()},
                     year=year_locked,
                     month=month_locked,
                 )
-
                 st.download_button(
-                    label="📊 Export Excel",
+                    label="Export Excel",
                     data=excel_buffer,
                     file_name=f"planning_{year_locked}_{month_locked:02d}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    mime=("application/vnd.openxmlformats-officedocument"
+                          ".spreadsheetml.sheet"),
                     key=f"excel_{year_locked}_{month_locked}",
+                    use_container_width=True,
                 )
 
             with col_b:
@@ -581,74 +660,22 @@ with tab6:
                     year=year_locked,
                     month=month_locked,
                 )
-
                 st.download_button(
-                    label="📆 Export iCal",
+                    label="Export iCal",
                     data=ical_bytes,
                     file_name=f"planning_{year_locked}_{month_locked:02d}.ics",
                     mime="text/calendar",
                     key=f"ical_{year_locked}_{month_locked}",
+                    use_container_width=True,
                 )
 
-            # ====================================================
-            # AFFICHAGE CALENDRIER
-            # ====================================================
-            cal = calendar.Calendar(firstweekday=0)
-            weeks = cal.monthdatescalendar(year_locked, month_locked)
-
-            day_map = {}
-            for blk in blocks_l:
-                if not blk["assigned_to"]:
-                    continue
-                cur = blk["start"]
-                while cur <= blk["end"]:
-                    if cur.month == month_locked and cur.year == year_locked:
-                        day_map[cur.isoformat()] = blk["assigned_to"]
-                    cur += dt.timedelta(days=1)
-
-            for week in weeks:
-                cols = st.columns(7)
-                for i, day in enumerate(week):
-                    if day.month != month_locked:
-                        cols[i].markdown(
-                            f"<div style='opacity:.3'>{day.day}</div>",
-                            unsafe_allow_html=True
-                        )
-                        continue
-
-                    assigned = day_map.get(day.isoformat())
-                    if assigned:
-                        cols[i].markdown(
-                            f"""
-                            <div style="
-                                background:{user_colors.get(assigned, '#546E7A')};
-                                color:white;
-                                border-radius:10px;
-                                padding:8px;
-                                text-align:center;
-                                font-size:12px;
-                            ">
-                                {day.day}<br>{esc(display_name(users, assigned))}
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        cols[i].markdown(
-                            f"""
-                            <div style="
-                                border:2px dashed #757575;
-                                color:#757575;
-                                border-radius:10px;
-                                padding:8px;
-                                text-align:center;
-                                font-size:11px;
-                            ">
-                                {day.day}<br>—
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
+            st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
+            render_calendar(
+                users=users, theme=theme, day_map=day_map_l,
+                year=year_locked, month=month_locked,
+                uncovered_label="—",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
     if not found:
-        st.info("Aucun planning verrouillé.")
+        st.info("Aucun planning verrouillé pour l'instant.")

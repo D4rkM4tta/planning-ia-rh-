@@ -1,0 +1,12 @@
+cat > .streamlit/config.toml << 'EOF'
+[theme]
+base = "dark"
+primaryColor = "#378ADD"
+backgroundColor = "#16181C"
+secondaryBackgroundColor = "#1E2126"
+textColor = "#E8E6E0"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+EOF

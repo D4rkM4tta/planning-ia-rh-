@@ -10,5 +10,5 @@ __pycache__/
 
 # Secrets
 firebase_key.json
-.streamlit/
+.streamlit/secrets.toml
 .email_credentials.toml
