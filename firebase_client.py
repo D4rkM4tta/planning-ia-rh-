@@ -84,8 +84,19 @@ def is_admin() -> bool:
 # ============================================================
 # USERS
 # ============================================================
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_users() -> dict:
+    """
+    Liste des collaborateurs.
+    Mise en cache 60s pour éviter de relire Firestore à chaque
+    interaction Streamlit (le script est réexécuté à chaque clic).
+    """
     return {doc.id: doc.to_dict() for doc in USERS.stream()}
+
+
+def invalidate_users_cache() -> None:
+    """À appeler après toute écriture sur un document utilisateur."""
+    get_all_users.clear()
 
 # ============================================================
 # DISPONIBILITÉS
@@ -102,6 +113,7 @@ def save_availability(email: str, year: int, month: int, availability: dict) -> 
         {f"availability_{year}_{month}": availability},
         merge=True,
     )
+    invalidate_users_cache()
 
 # ============================================================
 # FORÇAGE ADMIN
@@ -209,6 +221,7 @@ def save_monthly_hours(email: str, year: int, month: int, hours: int) -> None:
         {f"hours_{year}_{month}": int(hours)},
         merge=True,
     )
+    invalidate_users_cache()
 
 # ============================================================
 # HEURES RÉELLES (MOIS PAR MOIS)
@@ -238,3 +251,4 @@ def save_actual_month_hours(
         {f"actual_hours_{year}_{month}": int(hours)},
         merge=True,
     )
+    invalidate_users_cache()

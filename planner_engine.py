@@ -9,6 +9,9 @@ import datetime as dt
 import random
 from collections import defaultdict
 
+# Amplitude 9h → 19h, 1h de repas non comptabilisée
+HOURS_PER_DAY = 9
+
 
 # ============================================================
 # OUTILS
@@ -59,7 +62,7 @@ def month_blocks(year: int, month: int):
 
 
 # ============================================================
-# FRAGMENTATION DE BLOCS (NOUVEAU)
+# FRAGMENTATION DE BLOCS
 # ============================================================
 
 def fragment_blocks_with_forced_assignments(blocks, forced_assignments):
@@ -95,51 +98,35 @@ def fragment_blocks_with_forced_assignments(blocks, forced_assignments):
             continue
 
         # 🔴 Cas 3 : FORÇAGES MULTIPLES → Fragmenter
-        # On fragmente par "plages continues de jours forcés à la même personne"
+        # On regroupe les jours consécutifs partageant le même état
+        # (même utilisateur forcé, ou absence de forçage).
         days_in_block = block["days"]
 
         i = 0
         while i < len(days_in_block):
-            day_iso = days_in_block[i]
+            current_owner = forced_assignments.get(days_in_block[i])
 
-            # Chercher tous les jours consécutifs avec le même forçage (ou pas de forçage)
-            if day_iso in forced_assignments:
-                # C'est un jour forcé → fragmenter autour
-                user = forced_assignments[day_iso]
+            j = i
+            while (
+                j < len(days_in_block)
+                and forced_assignments.get(days_in_block[j]) == current_owner
+            ):
+                j += 1
 
-                # Créer un bloc d'1 jour pour ce jour forcé
-                start_date = dt.date.fromisoformat(day_iso)
-                fragmented.append({
-                    "id": next_id,
-                    "type": f"{block['type']}_fragment",
-                    "start": start_date,
-                    "end": start_date,
-                    "days": [day_iso],
-                    "assigned_to": None,
-                })
-                next_id += 1
-                i += 1
-            else:
-                # Jour non-forcé → regrouper les jours consécutifs non-forcés
-                j = i
-                while j < len(days_in_block) and days_in_block[j] not in forced_assignments:
-                    j += 1
+            days_slice = days_in_block[i:j]
+            start_date = dt.date.fromisoformat(days_slice[0])
+            end_date = dt.date.fromisoformat(days_slice[-1])
 
-                # Créer un bloc avec les jours [i:j]
-                days_slice = days_in_block[i:j]
-                start_date = dt.date.fromisoformat(days_slice[0])
-                end_date = dt.date.fromisoformat(days_slice[-1])
-
-                fragmented.append({
-                    "id": next_id,
-                    "type": f"{block['type']}_fragment",
-                    "start": start_date,
-                    "end": end_date,
-                    "days": days_slice,
-                    "assigned_to": None,
-                })
-                next_id += 1
-                i = j
+            fragmented.append({
+                "id": next_id,
+                "type": f"{block['type']}_fragment",
+                "start": start_date,
+                "end": end_date,
+                "days": days_slice,
+                "assigned_to": None,
+            })
+            next_id += 1
+            i = j
 
     return fragmented, None
 
@@ -195,18 +182,6 @@ def _solve_once(
                 return True
         return False
 
-    def violates_hours(u, block_days):
-        projected = hours_by_user[u] + len(block_days) * 9
-        max_hours = target_hours[u] * (1 + tolerance)
-
-        if projected <= max_hours:
-            return False
-
-        if not overflow_used[u]:
-            return False
-
-        return True
-
     # 1️⃣ FORÇAGE ADMIN
     for block in blocks:
         if block["id"] not in forced_block_owner:
@@ -215,7 +190,7 @@ def _solve_once(
         block["assigned_to"] = u
         assigned_blocks.add(block["id"])
         assigned_by_user[u].add(block["id"])
-        hours_by_user[u] += len(block["days"]) * 9
+        hours_by_user[u] += len(block["days"]) * HOURS_PER_DAY
 
     users_sorted = list(users)
     random.shuffle(users_sorted)
@@ -230,7 +205,7 @@ def _solve_once(
             if violates_consecutive(u, block):
                 continue
 
-            projected = hours_by_user[u] + len(block["days"]) * 9
+            projected = hours_by_user[u] + len(block["days"]) * HOURS_PER_DAY
             max_hours = target_hours[u] * (1 + tolerance)
 
             if projected > max_hours:
@@ -255,7 +230,7 @@ def _solve_once(
             if violates_consecutive(u, block):
                 continue
 
-            projected = hours_by_user[u] + len(block["days"]) * 9
+            projected = hours_by_user[u] + len(block["days"]) * HOURS_PER_DAY
             max_hours = target_hours[u] * (1 + tolerance)
 
             if projected > max_hours:
@@ -264,6 +239,7 @@ def _solve_once(
                 overflow_used[u] = True
 
             block["assigned_to"] = u
+            assigned_blocks.add(block["id"])
             assigned_by_user[u].add(block["id"])
             hours_by_user[u] = projected
             break
@@ -284,15 +260,19 @@ def generate_planning(
         availability_by_user: dict,
         forced_assignments: dict,
         attempts: int = 80,
+        seed: int | None = None,
 ):
+    if seed is not None:
+        random.seed(seed)
+
     target_hours = {
-        u: int(data["monthly_hours"])
+        u: int(data.get("monthly_hours") or 0)
         for u, data in users.items()
     }
 
     base_blocks = month_blocks(year, month)
 
-    # 🔥 FRAGMENTATION DES BLOCS (NOUVEAU)
+    # 🔥 FRAGMENTATION DES BLOCS
     base_blocks, frag_error = fragment_blocks_with_forced_assignments(
         base_blocks,
         forced_assignments
@@ -304,6 +284,7 @@ def generate_planning(
             "warnings": [frag_error],
         }
 
+    total_blocks = len(base_blocks)
     best_blocks = None
     best_score = -1
 
@@ -323,10 +304,17 @@ def generate_planning(
             best_blocks = solved
             best_score = score
 
-        if best_score == len(blocks):
+        if best_score == total_blocks:
             break
+
+    warnings = []
+    if best_blocks and best_score < total_blocks:
+        warnings.append(
+            f"{total_blocks - best_score} bloc(s) non couvert(s) "
+            f"sur {total_blocks}."
+        )
 
     return {
         "blocks": best_blocks or [],
-        "warnings": [],
+        "warnings": warnings,
     }
