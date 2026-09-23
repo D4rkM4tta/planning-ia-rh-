@@ -98,14 +98,26 @@ div[class*="st-key-avd-"] {{margin-bottom: 5px;}}
   .av-grid {{gap: 3px;}}
   .av-cell {{min-height: 38px; padding: 10px 1px;
              font-size: 13px; border-radius: 6px;}}
-  div[class*="st-key-avd-"] button {{min-height: 38px; font-size: 13px;}}
-  div[class*="st-key-avd-"] {{margin-bottom: 3px;}}
   .av-locked {{padding: 5px 1px; min-height: 38px; border-radius: 6px;}}
   .av-locked-n {{font-size: 12px;}}
   .av-locked-u {{font-size: 9px;}}
   .av-off {{min-height: 38px; font-size: 11px; padding: 10px 1px;}}
   .av-sum {{gap: 16px;}}
   .av-sum-v {{font-size: 14px;}}
+
+  /* Streamlit empile les colonnes sur mobile : on l'en empêche
+     dans la grille de saisie, sinon la semaine devient une liste
+     de sept lignes et le calendrier disparaît. */
+  div[class*="st-key-avgrid-"] div[data-testid="stHorizontalBlock"] {{
+    flex-wrap: nowrap !important; gap: 3px !important;
+  }}
+  div[class*="st-key-avgrid-"] div[data-testid="stColumn"] {{
+    min-width: 0 !important; flex: 1 1 0 !important; width: auto !important;
+  }}
+  div[class*="st-key-avd-"] button {{
+    min-height: 38px; font-size: 13px;
+  }}
+  div[class*="st-key-avd-"] {{margin-bottom: 3px;}}
 }}
 </style>
 """,
@@ -238,11 +250,11 @@ def render_availability_editor(*, email, year, month, forced, users,
                  use_container_width=True):
         st.session_state[state_key] = days_of(lambda d: True)
         st.rerun()
-    if b2.button("Semaine", key=f"avq-week-{year}-{month}",
+    if b2.button("Sem.", key=f"avq-week-{year}-{month}",
                  use_container_width=True, help="Lundi à jeudi"):
         st.session_state[state_key] = days_of(lambda d: d.weekday() <= 3)
         st.rerun()
-    if b3.button("Week-end", key=f"avq-we-{year}-{month}",
+    if b3.button("W-E", key=f"avq-we-{year}-{month}",
                  use_container_width=True, help="Vendredi à dimanche"):
         st.session_state[state_key] = days_of(lambda d: d.weekday() >= 4)
         st.rerun()
@@ -253,34 +265,37 @@ def render_availability_editor(*, email, year, month, forced, users,
 
     st.markdown(dow_row(), unsafe_allow_html=True)
 
-    for week in weeks:
-        cols = st.columns(7, gap="small")
-        for i, day in enumerate(week):
-            if day.year != year or day.month != month:
-                cols[i].markdown(
-                    f'<div class="av-off">{day.day}</div>',
-                    unsafe_allow_html=True,
-                )
-                continue
+    # Conteneur identifié : sert d'ancre au CSS qui empêche les
+    # colonnes de s'empiler sur mobile.
+    with st.container(key=f"avgrid-{year}-{month}"):
+        for week in weeks:
+            cols = st.columns(7, gap="small")
+            for i, day in enumerate(week):
+                if day.year != year or day.month != month:
+                    cols[i].markdown(
+                        f'<div class="av-off">{day.day}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    continue
 
-            day_iso = day.isoformat()
-            forced_user = forced.get(day_iso)
+                day_iso = day.isoformat()
+                forced_user = forced.get(day_iso)
 
-            if forced_user:
-                cols[i].markdown(
-                    _forced_cell(day, users, forced_user),
-                    unsafe_allow_html=True,
-                )
-                continue
+                if forced_user:
+                    cols[i].markdown(
+                        _forced_cell(day, users, forced_user),
+                        unsafe_allow_html=True,
+                    )
+                    continue
 
-            if cols[i].button(str(day.day),
-                              key=_day_key(year, month, day.day),
-                              use_container_width=True):
-                if day_iso in selected:
-                    selected.discard(day_iso)
-                else:
-                    selected.add(day_iso)
-                st.rerun()
+                if cols[i].button(str(day.day),
+                                  key=_day_key(year, month, day.day),
+                                  use_container_width=True):
+                    if day_iso in selected:
+                        selected.discard(day_iso)
+                    else:
+                        selected.add(day_iso)
+                    st.rerun()
 
     st.markdown(_summary(selected, forced), unsafe_allow_html=True)
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
