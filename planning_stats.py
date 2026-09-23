@@ -7,7 +7,7 @@ from firebase_client import (
     save_cumul_adjustment,
     reset_monthly_hours,
 )
-from theme import esc, rate_color, gap_color, TEXT_SOFT
+from theme import esc, rate_color, gap_color, TEXT_SOFT, TEXT, TEXT_MUTED
 
 # Amplitude 9h → 19h, 1h de repas non comptabilisée
 HOURS_PER_DAY = 9
@@ -90,8 +90,12 @@ def _render_cards(df, year, ref_month_name, locked_count):
     )
 
 
-def _render_html_table(df, theme):
-    """Tableau en lecture seule, pour les non-admins."""
+def _render_readonly(df, theme):
+    """
+    Vue lecture seule pour les non-admins.
+    Tableau sur grand écran, cartes empilées sur mobile :
+    les deux sont émis, le CSS n'en montre qu'un.
+    """
     head = (
         '<div class="pl-tr pl-th">'
         '<div>Collaborateur</div>'
@@ -103,7 +107,9 @@ def _render_html_table(df, theme):
         '<div>Taux</div></div>'
     )
 
-    body = []
+    rows_html = []
+    cards_html = []
+
     for _, r in df.iterrows():
         dot = theme.get(r["_email"], {}).get("dot", "#888780")
         gap = int(r["Écart"])
@@ -111,10 +117,10 @@ def _render_html_table(df, theme):
         pct = float(r["Taux"])
         bar = rate_color(pct)
         width = min(pct, 100)
-        flag = (f' <span style="font-size:10px;color:#EF9F27">ajusté</span>'
+        flag = (' <span style="font-size:10px;color:#EF9F27">ajusté</span>'
                 if r["_ajuste"] else "")
 
-        body.append(
+        rows_html.append(
             f'<div class="pl-tr">'
             f'<div><span class="pl-dot" style="background:{dot}"></span>'
             f'{esc(r["Collaborateur"])}{flag}</div>'
@@ -133,8 +139,32 @@ def _render_html_table(df, theme):
             f'</div>'
         )
 
+        cards_html.append(
+            f'<div class="pl-ucard">'
+            f'<div class="pl-ucard-top">'
+            f'<div style="display:flex;align-items:center;gap:7px">'
+            f'<span class="pl-dot" style="background:{dot};margin:0"></span>'
+            f'<span style="font-size:13px;color:{TEXT}">'
+            f'{esc(r["Collaborateur"])}</span>{flag}</div>'
+            f'<span style="font-size:11px;color:{gap_col}">{gap:+d} h</span>'
+            f'</div>'
+            f'<div style="display:flex;align-items:center;gap:9px;'
+            f'margin-bottom:6px">'
+            f'<span class="pl-bar"><span style="width:{width}%;'
+            f'background:{bar}"></span></span>'
+            f'<span style="font-size:10px;color:{TEXT_SOFT}">'
+            f'{pct:.0f} %</span></div>'
+            f'<div class="pl-ucard-meta">'
+            f'<span>Contrat {int(r["Contrat"])} h</span>'
+            f'<span>Retenu {int(r["Heures mois"])} h</span>'
+            f'<span>WE {int(r["WE"])}</span>'
+            f'<span>Fériés {int(r["Fériés"])}</span></div>'
+            f'</div>'
+        )
+
     st.markdown(
-        f'<div class="pl-tbl">{head}{"".join(body)}</div>',
+        f'<div class="pl-tbl">{head}{"".join(rows_html)}</div>'
+        f'<div class="pl-ucards">{"".join(cards_html)}</div>',
         unsafe_allow_html=True,
     )
 
@@ -253,8 +283,8 @@ def render_hours_dashboard(
     current_email: str,
 ):
     """
-    Synthèse des heures : cartes de totaux, puis tableau détaillé.
-    Lecture seule (HTML) pour les collaborateurs,
+    Synthèse des heures : cartes de totaux, puis détail.
+    Lecture seule (HTML responsive) pour les collaborateurs,
     éditable (data_editor) pour l'administrateur.
     """
     rows = _build_rows(
@@ -279,4 +309,4 @@ def render_hours_dashboard(
     if admin:
         _render_editor(df, year, month, month_name)
     else:
-        _render_html_table(df, theme)
+        _render_readonly(df, theme)

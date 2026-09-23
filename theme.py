@@ -25,8 +25,8 @@ PALETTE = [
 # ============================================================
 # NEUTRES (thème sombre)
 # ============================================================
-SURFACE = "#1E2126"      # conteneur / carte de fond
-CARD = "#262A31"         # carte posée sur la surface
+SURFACE = "#1E2126"
+CARD = "#262A31"
 BORDER = "#343941"
 TEXT = "#E8E6E0"
 TEXT_SOFT = "#A8A59D"
@@ -55,6 +55,12 @@ def user_theme(users: dict) -> dict:
 def esc(value) -> str:
     """Échappe une valeur avant injection dans du HTML."""
     return html.escape(str(value if value is not None else ""))
+
+
+def abbrev(name: str, length: int = 4) -> str:
+    """Prénom tronqué, pour les cases étroites du calendrier mobile."""
+    first = (name or "").split(" ")[0]
+    return first[:length]
 
 
 def rate_color(pct: float) -> str:
@@ -97,10 +103,13 @@ h1, h2, h3 {{font-weight: 500; letter-spacing: -0.01em;}}
 .stTabs [data-baseweb="tab-list"] {{
   gap: 2px; background: var(--pl-surface); padding: 4px;
   border-radius: 10px; border: none;
+  overflow-x: auto; scrollbar-width: none;
 }}
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {{display: none;}}
 .stTabs [data-baseweb="tab"] {{
   height: 36px; padding: 0 14px; border-radius: 7px;
   font-size: 14px; color: var(--pl-soft); background: transparent;
+  white-space: nowrap;
 }}
 .stTabs [aria-selected="true"] {{
   background: var(--pl-card); color: var(--pl-text);
@@ -136,9 +145,11 @@ hr {{margin: 1.4rem 0; border-color: var(--pl-border);}}
   font-size: 11px; color: var(--pl-muted); text-align: center;
   padding-bottom: 5px; letter-spacing: .03em;
 }}
+.pl-dow-s {{display: none;}}
 .pl-cell {{border-radius: 8px; padding: 8px 7px; min-height: 56px;}}
 .pl-num {{font-size: 12px; line-height: 1.2;}}
 .pl-name {{font-size: 11px; margin-top: 3px; line-height: 1.25;}}
+.pl-name-s {{display: none;}}
 .pl-off {{min-height: 56px; padding: 8px 7px;}}
 .pl-off .pl-num {{color: #40444B;}}
 .pl-legend {{display: flex; gap: 7px; flex-wrap: wrap; margin-top: 14px;}}
@@ -185,6 +196,56 @@ hr {{margin: 1.4rem 0; border-color: var(--pl-border);}}
   overflow: hidden; flex: 1;
 }}
 .pl-bar span {{display: block; height: 100%;}}
+
+.pl-ucards {{display: none;}}
+.pl-ucard {{
+  background: var(--pl-surface); border-radius: 9px;
+  padding: 11px 13px; margin-bottom: 7px;
+}}
+.pl-ucard-top {{
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 7px;
+}}
+.pl-ucard-meta {{
+  display: flex; gap: 14px; font-size: 10px;
+  color: var(--pl-muted); flex-wrap: wrap;
+}}
+
+@media (max-width: 640px) {{
+  .block-container {{padding-top: 1.2rem; padding-left: .7rem; padding-right: .7rem;}}
+
+  .pl-title {{font-size: 16px;}}
+  .pl-badge {{font-size: 10px; padding: 2px 8px; margin-left: 7px;}}
+
+  .pl-grid {{gap: 3px;}}
+  .pl-dow {{font-size: 0;}}
+  .pl-dow-s {{display: inline; font-size: 9px;}}
+
+  .pl-cell {{
+    padding: 4px 1px; min-height: 0; text-align: center;
+    border-radius: 6px;
+  }}
+  .pl-num {{font-size: 10px; line-height: 1.1;}}
+  .pl-name {{font-size: 0; margin-top: 0;}}
+  .pl-name-s {{display: inline; font-size: 9px; line-height: 1.2;}}
+  .pl-off {{min-height: 0; padding: 4px 1px; text-align: center;}}
+
+  .pl-wrap {{padding: 13px; border-radius: 12px;}}
+  .pl-chip {{font-size: 9px; padding: 2px 7px;}}
+  .pl-legend {{gap: 4px; margin-top: 11px;}}
+  .pl-stats {{gap: 17px; margin-top: 11px; padding-top: 10px;}}
+  .pl-stat-l {{font-size: 9px;}}
+  .pl-stat-v {{font-size: 14px;}}
+
+  .pl-cards {{grid-template-columns: 1fr 1fr; gap: 7px; margin-bottom: 12px;}}
+  .pl-card {{padding: 9px 11px;}}
+  .pl-card-l {{font-size: 10px;}}
+  .pl-card-v {{font-size: 18px;}}
+  .pl-card-s {{font-size: 9px;}}
+
+  .pl-tbl {{display: none;}}
+  .pl-ucards {{display: block;}}
+}}
 </style>
 """,
         unsafe_allow_html=True,
