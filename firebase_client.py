@@ -134,11 +134,23 @@ def load_availability(email: str, year: int, month: int) -> dict:
     return doc.to_dict().get(f"availability_{year}_{month}", {})
 
 
-def save_availability(email: str, year: int, month: int, availability: dict) -> None:
-    USERS.document(normalize_email(email)).set(
-        {f"availability_{year}_{month}": availability},
-        merge=True,
-    )
+def save_availability(email: str, year: int, month: int,
+                      availability: dict) -> None:
+    """
+    Remplace intégralement les disponibilités du mois.
+
+    set(..., merge=True) fusionne les maps en profondeur : les jours
+    retirés survivraient à l'enregistrement. On supprime donc le
+    champ avant de le réécrire, pour que décocher un jour soit bien
+    pris en compte.
+    """
+    field = f"availability_{year}_{month}"
+    ref = USERS.document(normalize_email(email))
+
+    ref.set({field: firestore.DELETE_FIELD}, merge=True)
+    if availability:
+        ref.set({field: availability}, merge=True)
+
     invalidate_users_cache()
 
 
@@ -158,12 +170,24 @@ def save_forced_assignment(
         ref.set({day_iso: firestore.DELETE_FIELD}, merge=True)
     else:
         ref.set({day_iso: normalize_email(email)}, merge=True)
+    invalidate_forced_cache()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_forced_assignments(year: int, month: int) -> dict:
+    """
+    Forçages d'un mois. Mis en cache : la vue déroulante affiche
+    une vingtaine de mois, ce qui ferait autant de lectures
+    Firestore à chaque interaction sans cela.
+    """
     ref = FORCED.document(f"{year}_{month}")
     doc = ref.get()
     return doc.to_dict() if doc.exists else {}
+
+
+def invalidate_forced_cache() -> None:
+    """À appeler après toute écriture sur un forçage."""
+    load_forced_assignments.clear()
 
 
 # ============================================================
@@ -218,9 +242,9 @@ def save_planning_proposal(
 def load_planning_proposals(year: int, month: int) -> dict:
     """
     Charge le planning d'un mois.
-    Mis en cache : les onglets Heures et Planning validé bouclent
-    sur 12 à 24 mois, ce qui ferait autant de lectures Firestore
-    à chaque clic sans cela.
+    Mis en cache : les onglets Heures et Plannings bouclent sur
+    une vingtaine de mois, ce qui ferait autant de lectures
+    Firestore à chaque clic sans cela.
     """
     ref = PROPOSALS.document(f"{year}-{month:02d}")
     doc = ref.get()

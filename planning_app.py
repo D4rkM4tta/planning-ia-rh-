@@ -8,6 +8,8 @@ from firebase_client import (
     is_admin,
     load_availability,
     save_availability,
+    load_forced_assignments,
+    save_forced_assignment,
     get_all_users,
     load_planning_proposals,
     save_planning_proposal,
@@ -15,7 +17,12 @@ from firebase_client import (
     is_planning_locked,
 )
 
-from components.calendar_availability import availability_calendar
+from components.calendar_availability import (
+    inject_availability_css,
+    availability_legend,
+    render_availability_static,
+    render_availability_editor,
+)
 from planner_engine import generate_planning
 from planning_exports import export_planning_excel_calendar_colored
 from planning_exports import export_planning_ical
@@ -50,9 +57,12 @@ st.set_page_config(
 )
 
 inject_css()
+inject_availability_css()
 
 # Amplitude 9h → 19h, 1h de repas non comptabilisée
 HOURS_PER_DAY = 9
+
+YEARS = [2026, 2027]
 
 MONTH_LABELS = {
     1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
@@ -60,7 +70,6 @@ MONTH_LABELS = {
     9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
 }
 
-# (libellé large, initiale mobile)
 DOW = [
     ("Lun", "L"), ("Mar", "M"), ("Mer", "M"), ("Jeu", "J"),
     ("Ven", "V"), ("Sam", "S"), ("Dim", "D"),
@@ -75,19 +84,16 @@ def month_label(month: int) -> str:
 
 
 def display_name(users: dict, email: str) -> str:
-    """Nom d'affichage robuste même si l'utilisateur n'existe plus."""
     if not email:
         return "—"
     return users.get(email, {}).get("name") or email.split("@")[0]
 
 
 def short_name(users: dict, email: str) -> str:
-    """Prénom seul, pour tenir dans une cellule de calendrier."""
     return display_name(users, email).split(" ")[0]
 
 
 def dow_header() -> list:
-    """En-tête des jours : libellé complet + initiale pour mobile."""
     return [
         f'<div class="pl-dow">{full}<span class="pl-dow-s">{sh}</span></div>'
         for full, sh in DOW
@@ -95,10 +101,6 @@ def dow_header() -> list:
 
 
 def name_cell(full: str, color: str) -> str:
-    """
-    Nom affiché dans une case : version complète et version
-    tronquée coexistent, le CSS n'en montre qu'une.
-    """
     return (
         f'<div class="pl-name" style="color:{color}">{esc(full)}'
         f'<span class="pl-name-s">{esc(abbrev(full))}</span></div>'
@@ -107,6 +109,16 @@ def name_cell(full: str, color: str) -> str:
 
 def normalize_availability(raw: dict) -> dict:
     return {str(k)[:10]: True for k, v in raw.items() if v is True}
+
+
+def availability_of(users: dict, email: str, year: int, month: int) -> set:
+    """
+    Disponibilités lues depuis le cache utilisateurs, sans requête
+    Firestore supplémentaire : la vue déroulante parcourt beaucoup
+    de mois.
+    """
+    raw = users.get(email, {}).get(f"availability_{year}_{month}", {}) or {}
+    return {str(k)[:10] for k, v in raw.items() if v is True}
 
 
 def compute_hours(planning_blocks):
@@ -129,10 +141,6 @@ def month_hours_for_user(users: dict, user_email: str, year: int, month: int,
 
 def compute_year_cumulative(users: dict, year: int, up_to_month: int,
                             only_locked: bool):
-    """
-    Cumul annuel par collaborateur, de janvier jusqu'au mois demandé.
-    only_locked=True → uniquement les plannings verrouillés.
-    """
     cumulative = {}
     months_used = []
 
@@ -205,12 +213,11 @@ def build_day_map(blocks, year: int, month: int) -> dict:
 
 
 # ============================================================
-# RENDU DU CALENDRIER
+# RENDU DU CALENDRIER DE PLANNING
 # ============================================================
 def render_calendar(*, users, theme, day_map, year, month,
                     uncovered_label="Non couvert", show_legend=True,
                     show_stats=True):
-    """Calendrier mensuel en une seule injection HTML."""
     cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(year, month)
 
@@ -289,7 +296,8 @@ def render_calendar(*, users, theme, day_map, year, month,
 
 
 def month_header(title: str, badge: str | None = None,
-                 badge_bg: str = OK_BG, badge_fg: str = OK_FG):
+                 badge_bg: str = OK_BG, badge_fg: str = OK_FG,
+                 top: int = 0):
     chip = ""
     if badge:
         chip = (
@@ -297,7 +305,8 @@ def month_header(title: str, badge: str | None = None,
             f'color:{badge_fg}">{esc(badge)}</span>'
         )
     st.markdown(
-        f'<div class="pl-head"><div class="pl-title">{esc(title)}{chip}</div></div>',
+        f'<div class="pl-head" style="margin-top:{top}px">'
+        f'<div class="pl-title">{esc(title)}{chip}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -307,6 +316,7 @@ def month_header(title: str, badge: str | None = None,
 # ============================================================
 st.session_state.setdefault("auth_user", None)
 st.session_state.setdefault("forced_assignments", {})
+st.session_state.setdefault("av_edit", None)
 
 
 # ============================================================
@@ -379,62 +389,239 @@ st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 # ============================================================
 # ONGLETS
 # ============================================================
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Disponibilités",
+tab_feed, tab_admin, tab_rules, tab_hours = st.tabs([
+    "Plannings",
     "Admin",
-    "Planning",
     "Règles",
     "Heures",
-    "Validés",
 ])
 
-# ============================================================
-# TAB 1 — DISPONIBILITÉS
-# ============================================================
-with tab1:
-    c1, c2 = st.columns(2)
-    year = c1.selectbox("Année", [2026, 2027], index=0, key="user_year")
-    month = c2.selectbox("Mois", list(range(1, 13)), index=2,
-                         format_func=month_label, key="user_month")
 
-    availability_calendar(
-        email=current_email,
-        year=year,
-        month=month,
-        load_fn=load_availability,
-        save_fn=save_availability,
-        is_admin=admin,
-        users=users,
-        forced_assignments=st.session_state.forced_assignments,
+# ============================================================
+# QUELS MOIS AFFICHER
+# ============================================================
+def months_to_show():
+    """
+    Mois verrouillés (y compris passés) + tous les mois à venir,
+    dans l'ordre chronologique.
+    """
+    today = dt.date.today()
+    out = []
+    for y in YEARS:
+        for m in range(1, 13):
+            locked = is_planning_locked(y, m)
+            upcoming = (y, m) >= (today.year, today.month)
+            if locked or upcoming:
+                out.append((y, m, locked))
+    return out
+
+
+# ============================================================
+# ONGLET PRINCIPAL — FIL DES MOIS
+# ============================================================
+with tab_feed:
+    editing = st.session_state.av_edit
+
+    st.caption(
+        "Les mois verrouillés affichent le planning définitif. "
+        "Sur les mois à venir, indiquez vos disponibilités : "
+        "elles ne sont visibles que par vous et l'administrateur."
     )
+    st.markdown(availability_legend(), unsafe_allow_html=True)
+
+    feed = months_to_show()
+
+    if not feed:
+        st.info("Aucun mois à afficher.")
+
+    for y, m, locked in feed:
+        proposals = load_planning_proposals(y, m)
+        proposal = proposals.get("current")
+        forced = load_forced_assignments(y, m) or {}
+
+        # ---------- En-tête du mois ----------
+        if locked:
+            month_header(f"{month_label(m)} {y}", "Verrouillé", top=26)
+        elif proposal:
+            month_header(f"{month_label(m)} {y}", "Planning proposé",
+                         NEUTRAL_BG, NEUTRAL_FG, top=26)
+        else:
+            month_header(f"{month_label(m)} {y}", "À venir",
+                         NEUTRAL_BG, NEUTRAL_FG, top=26)
+
+        st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
+
+        # ---------- Mois verrouillé : le planning ----------
+        if locked:
+            blocks_l = proposal["planning"]["blocks"]
+            render_calendar(
+                users=users, theme=theme,
+                day_map=build_day_map(blocks_l, y, m),
+                year=y, month=m, uncovered_label="—",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.download_button(
+                    label="Excel",
+                    data=export_planning_excel_calendar_colored(
+                        blocks=blocks_l, users=users,
+                        user_colors={e: c["dot"] for e, c in theme.items()},
+                        year=y, month=m,
+                    ),
+                    file_name=f"planning_{y}_{m:02d}.xlsx",
+                    mime=("application/vnd.openxmlformats-officedocument"
+                          ".spreadsheetml.sheet"),
+                    key=f"excel_{y}_{m}",
+                    use_container_width=True,
+                )
+            with col_b:
+                st.download_button(
+                    label="iCal",
+                    data=export_planning_ical(
+                        planning=proposal["planning"], users=users,
+                        year=y, month=m,
+                    ),
+                    file_name=f"planning_{y}_{m:02d}.ics",
+                    mime="text/calendar",
+                    key=f"ical_{y}_{m}",
+                    use_container_width=True,
+                )
+
+            if admin:
+                if st.button("Déverrouiller", key=f"unlock_{y}_{m}"):
+                    set_planning_lock(y, m, False)
+                    st.rerun()
+            continue
+
+        # ---------- Mois à venir : mes disponibilités ----------
+        stored = availability_of(users, current_email, y, m)
+
+        if editing == (y, m):
+            render_availability_editor(
+                email=current_email, year=y, month=m,
+                forced=forced, users=users,
+                save_fn=save_availability, stored_days=stored,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            render_availability_static(
+                year=y, month=m, selected=stored,
+                forced=forced, users=users,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            if st.button("Modifier mes disponibilités",
+                         key=f"edit_{y}_{m}", use_container_width=True):
+                st.session_state.av_edit = (y, m)
+                st.rerun()
+
+        # ---------- Actions administrateur ----------
+        if admin:
+            a1, a2 = st.columns(2)
+
+            if a1.button("Générer le planning", key=f"gen_{y}_{m}",
+                         use_container_width=True):
+                availability_by_user = {
+                    u: normalize_availability(load_availability(u, y, m))
+                    for u in users
+                }
+                planning = generate_planning(
+                    year=y, month=m, users=users,
+                    availability_by_user=availability_by_user,
+                    forced_assignments=forced,
+                )
+                save_planning_proposal(y, m, "current", planning, current_email)
+                for warning in planning.get("warnings", []):
+                    st.warning(warning)
+                st.rerun()
+
+            if proposal:
+                if a2.button("Verrouiller", key=f"lock_{y}_{m}",
+                             type="primary", use_container_width=True):
+                    set_planning_lock(y, m, True, current_email)
+                    st.rerun()
+
+            if proposal:
+                with st.expander("Voir le planning proposé"):
+                    render_calendar(
+                        users=users, theme=theme,
+                        day_map=build_day_map(
+                            proposal["planning"]["blocks"], y, m
+                        ),
+                        year=y, month=m,
+                    )
+
+            with st.expander(f"Forçage administrateur ({len(forced)} jour(s))"):
+                last_day = calendar.monthrange(y, m)[1]
+                f1, f2 = st.columns(2)
+
+                fday = f1.date_input(
+                    "Jour", value=dt.date(y, m, 1),
+                    min_value=dt.date(y, m, 1),
+                    max_value=dt.date(y, m, last_day),
+                    format="DD/MM/YYYY", key=f"fd_{y}_{m}",
+                )
+
+                labels = {
+                    info.get("name", mail.split("@")[0]): mail
+                    for mail, info in users.items()
+                }
+                chosen = f2.selectbox("Collaborateur", options=sorted(labels),
+                                      key=f"fu_{y}_{m}")
+
+                dkey = fday.isoformat()
+                g1, g2 = st.columns(2)
+
+                if g1.button("Forcer ce jour", key=f"fb_{y}_{m}",
+                             use_container_width=True):
+                    save_forced_assignment(y, m, dkey, labels[chosen])
+                    st.rerun()
+
+                if dkey in forced:
+                    if g2.button("Annuler le forçage", key=f"ub_{y}_{m}",
+                                 use_container_width=True):
+                        save_forced_assignment(y, m, dkey, None)
+                        st.rerun()
+
+                if forced:
+                    lines = []
+                    for d in sorted(forced):
+                        who = users.get(forced[d], {}).get(
+                            "name", forced[d].split("@")[0]
+                        )
+                        pretty = dt.date.fromisoformat(d).strftime("%d/%m")
+                        lines.append(
+                            f'<div style="font-size:12px;color:{TEXT_SOFT};'
+                            f'padding:2px 0">{pretty} — {esc(who)}</div>'
+                        )
+                    st.markdown("".join(lines), unsafe_allow_html=True)
+
 
 # ============================================================
-# TAB 2 — ADMIN (disponibilités croisées)
+# ONGLET ADMIN — DISPONIBILITÉS CROISÉES
 # ============================================================
-with tab2:
+with tab_admin:
     if not admin:
         st.info("Onglet réservé aux administrateurs.")
     else:
         c1, c2 = st.columns(2)
-        year_admin = c1.selectbox("Année", [2026, 2027], index=0,
-                                  key="admin_year")
-        month_admin = c2.selectbox("Mois", list(range(1, 13)), index=2,
+        year_admin = c1.selectbox("Année", YEARS, index=0, key="admin_year")
+        month_admin = c2.selectbox("Mois", list(range(1, 13)),
+                                   index=dt.date.today().month - 1,
                                    format_func=month_label, key="admin_month")
 
-        availability_by_user = {
-            u: normalize_availability(load_availability(u, year_admin, month_admin))
-            for u in users
-        }
-
         dispo_by_day = {}
-        for u, days in availability_by_user.items():
-            for d in days:
+        for u in users:
+            for d in availability_of(users, u, year_admin, month_admin):
                 dispo_by_day.setdefault(d, []).append(u)
 
         month_header(f"Disponibilités — {month_label(month_admin)} {year_admin}")
 
-        cal = calendar.Calendar(firstweekday=0)
-        weeks = cal.monthdatescalendar(year_admin, month_admin)
+        weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(
+            year_admin, month_admin
+        )
 
         parts = ['<div class="pl-wrap"><div class="pl-grid">']
         parts += dow_header()
@@ -444,13 +631,13 @@ with tab2:
             for day in week:
                 if day.month != month_admin or day.year != year_admin:
                     parts.append(
-                        f'<div class="pl-off"><div class="pl-num">{day.day}</div></div>'
+                        f'<div class="pl-off"><div class="pl-num">{day.day}'
+                        f'</div></div>'
                     )
                     continue
 
-                available = dispo_by_day.get(day.isoformat(), [])
                 inner = ""
-                for u in available:
+                for u in dispo_by_day.get(day.isoformat(), []):
                     c = theme.get(u, {})
                     first = short_name(users, u)
                     inner += (
@@ -462,93 +649,18 @@ with tab2:
                 parts.append(
                     f'<div class="pl-cell" style="background:{CARD};'
                     f'min-height:78px">'
-                    f'<div class="pl-num" style="color:{TEXT_MUTED}">{day.day}</div>'
-                    f'{inner}</div>'
+                    f'<div class="pl-num" style="color:{TEXT_MUTED}">'
+                    f'{day.day}</div>{inner}</div>'
                 )
 
         parts.append("</div></div>")
         st.markdown("".join(parts), unsafe_allow_html=True)
 
-# ============================================================
-# TAB 3 — PLANNING
-# ============================================================
-with tab3:
-    c1, c2 = st.columns(2)
-    year_v = c1.selectbox("Année", [2026, 2027], index=0, key="view_year")
-    month_v = c2.selectbox("Mois", list(range(1, 13)), index=2,
-                           format_func=month_label, key="view_month")
-
-    locked_v = is_planning_locked(year_v, month_v)
-
-    if admin and not locked_v:
-        if st.button("Générer le planning", key="generate_planning",
-                     type="primary"):
-            availability_by_user = {
-                u: normalize_availability(load_availability(u, year_v, month_v))
-                for u in users
-            }
-
-            planning = generate_planning(
-                year=year_v,
-                month=month_v,
-                users=users,
-                availability_by_user=availability_by_user,
-                forced_assignments=st.session_state.forced_assignments,
-            )
-
-            save_planning_proposal(year_v, month_v, "current",
-                                   planning, current_email)
-
-            for warning in planning.get("warnings", []):
-                st.warning(warning)
-
-            st.rerun()
-
-    proposals = load_planning_proposals(year_v, month_v)
-    proposal = proposals.get("current")
-
-    if locked_v:
-        month_header(f"{month_label(month_v)} {year_v}", "Verrouillé")
-    elif proposal:
-        month_header(f"{month_label(month_v)} {year_v}", "Brouillon",
-                     NEUTRAL_BG, NEUTRAL_FG)
-    else:
-        month_header(f"{month_label(month_v)} {year_v}")
-
-    if not proposal:
-        st.info("Aucun planning généré pour ce mois.")
-    else:
-        blocks = proposal["planning"]["blocks"]
-        day_map = build_day_map(blocks, year_v, month_v)
-
-        st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
-        render_calendar(users=users, theme=theme, day_map=day_map,
-                        year=year_v, month=month_v)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        if admin:
-            st.markdown("<div style='height:14px'></div>",
-                        unsafe_allow_html=True)
-            if not locked_v:
-                st.caption(
-                    "Une fois verrouillé, ce planning ne peut plus être "
-                    "régénéré et ses heures entrent dans le cumul annuel."
-                )
-                if st.button("Verrouiller le planning", key="lock_planning"):
-                    set_planning_lock(year_v, month_v, True, current_email)
-                    st.rerun()
-            else:
-                locked_by = proposal.get("locked_by") or "—"
-                locked_at = (proposal.get("locked_at") or "")[:10]
-                st.caption(f"Verrouillé par {locked_by} le {locked_at}")
-                if st.button("Déverrouiller", key="unlock_planning"):
-                    set_planning_lock(year_v, month_v, False)
-                    st.rerun()
 
 # ============================================================
-# TAB 4 — RÈGLES RH
+# ONGLET RÈGLES
 # ============================================================
-with tab4:
+with tab_rules:
     st.markdown(
         f"""
 <div class="pl-wrap" style="max-width:640px">
@@ -568,12 +680,13 @@ with tab4:
         unsafe_allow_html=True,
     )
 
+
 # ============================================================
-# TAB 5 — HEURES
+# ONGLET HEURES
 # ============================================================
-with tab5:
+with tab_hours:
     c1, c2 = st.columns(2)
-    year_h = c1.selectbox("Année", [2026, 2027], index=0, key="hours_year")
+    year_h = c1.selectbox("Année", YEARS, index=0, key="hours_year")
     month_h = c2.selectbox("Mois analysé", list(range(1, 13)),
                            index=dt.date.today().month - 1,
                            format_func=month_label, key="hours_month")
@@ -611,8 +724,7 @@ with tab5:
 
     if not blocks_h:
         st.info(
-            f"Aucun planning généré pour {month_label(month_h)} {year_h}. "
-            "Les colonnes du mois sont à zéro."
+            f"Aucun planning généré pour {month_label(month_h)} {year_h}."
         )
 
     render_hours_dashboard(
@@ -633,77 +745,3 @@ with tab5:
         admin=admin,
         current_email=current_email,
     )
-
-# ============================================================
-# TAB 6 — PLANNINGS VERROUILLÉS
-# ============================================================
-with tab6:
-    found = False
-
-    for year_locked in [2026, 2027]:
-        for month_locked in range(1, 13):
-            proposals_l = load_planning_proposals(year_locked, month_locked)
-            proposal_l = proposals_l.get("current")
-
-            if not proposal_l or not proposal_l.get("locked"):
-                continue
-
-            found = True
-            blocks_l = proposal_l["planning"]["blocks"]
-            day_map_l = build_day_map(blocks_l, year_locked, month_locked)
-
-            st.markdown(
-                f'<div class="pl-head" style="margin-top:22px">'
-                f'<div class="pl-title">{month_label(month_locked)} '
-                f'{year_locked}<span class="pl-badge" '
-                f'style="background:{OK_BG};color:{OK_FG}">Verrouillé</span>'
-                f'</div></div>',
-                unsafe_allow_html=True,
-            )
-
-            col_a, col_b = st.columns(2)
-
-            with col_a:
-                excel_buffer = export_planning_excel_calendar_colored(
-                    blocks=blocks_l,
-                    users=users,
-                    user_colors={e: c["dot"] for e, c in theme.items()},
-                    year=year_locked,
-                    month=month_locked,
-                )
-                st.download_button(
-                    label="Excel",
-                    data=excel_buffer,
-                    file_name=f"planning_{year_locked}_{month_locked:02d}.xlsx",
-                    mime=("application/vnd.openxmlformats-officedocument"
-                          ".spreadsheetml.sheet"),
-                    key=f"excel_{year_locked}_{month_locked}",
-                    use_container_width=True,
-                )
-
-            with col_b:
-                ical_bytes = export_planning_ical(
-                    planning=proposal_l["planning"],
-                    users=users,
-                    year=year_locked,
-                    month=month_locked,
-                )
-                st.download_button(
-                    label="iCal",
-                    data=ical_bytes,
-                    file_name=f"planning_{year_locked}_{month_locked:02d}.ics",
-                    mime="text/calendar",
-                    key=f"ical_{year_locked}_{month_locked}",
-                    use_container_width=True,
-                )
-
-            st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
-            render_calendar(
-                users=users, theme=theme, day_map=day_map_l,
-                year=year_locked, month=month_locked,
-                uncovered_label="—",
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    if not found:
-        st.info("Aucun planning verrouillé pour l'instant.")
