@@ -155,14 +155,14 @@ hr {{margin: 1.4rem 0; border-color: var(--pl-border);}}
 .pl-legend {{display: flex; gap: 7px; flex-wrap: wrap; margin-top: 14px;}}
 .pl-chip {{font-size: 11px; padding: 3px 11px; border-radius: 20px;}}
 .pl-stats {{
-  display: flex; gap: 26px; margin-top: 14px;
+  display: flex; gap: 26px; margin-top: 14px; flex-wrap: wrap;
   padding-top: 13px; border-top: 1px solid var(--pl-border);
 }}
 .pl-stat-l {{font-size: 11px; color: var(--pl-muted);}}
 .pl-stat-v {{font-size: 17px; color: var(--pl-text); margin-top: 1px;}}
 .pl-wrap {{background: var(--pl-surface); border-radius: 12px; padding: 18px 20px;}}
 .pl-cards {{
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px; margin-bottom: 18px;
 }}
 .pl-card {{background: var(--pl-surface); border-radius: 9px; padding: 13px 15px;}}
@@ -177,7 +177,8 @@ hr {{margin: 1.4rem 0; border-color: var(--pl-border);}}
   border-radius: 11px; overflow: hidden;
 }}
 .pl-tr {{
-  display: grid; grid-template-columns: 1.6fr .8fr .8fr .8fr .7fr .7fr 1.5fr;
+  display: grid;
+  grid-template-columns: 1.5fr .7fr .7fr .7fr .8fr .8fr .8fr 1.3fr;
   gap: 8px; padding: 11px 15px; align-items: center;
   font-size: 13px; color: var(--pl-text);
 }}
@@ -208,7 +209,7 @@ hr {{margin: 1.4rem 0; border-color: var(--pl-border);}}
 }}
 .pl-ucard-meta {{
   display: flex; gap: 14px; font-size: 10px;
-  color: var(--pl-muted); flex-wrap: wrap;
+  color: var(--pl-muted); flex-wrap: wrap; margin-top: 3px;
 }}
 
 @media (max-width: 640px) {{

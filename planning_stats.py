@@ -28,7 +28,8 @@ def compute_realized(blocks, year: int, month: int) -> dict:
 
 
 def _build_rows(users, blocks, year, month, weekends_stats, holidays_stats,
-                cumul_locked, cumul_preview, admin, current_email):
+                weekends_year, holidays_year, cumul_locked, cumul_preview,
+                admin, current_email):
     realized = compute_realized(blocks, year, month)
     rows = []
 
@@ -54,8 +55,10 @@ def _build_rows(users, blocks, year, month, weekends_stats, holidays_stats,
             "Heures mois": retained,
             "Écart": retained - contract,
             "Taux": round(min(pct, 150.0), 1),
-            "WE": int(weekends_stats.get(email, 0)),
-            "Fériés": int(holidays_stats.get(email, 0)),
+            "WE mois": int(weekends_stats.get(email, 0)),
+            "WE année": int(weekends_year.get(email, 0)),
+            "Fériés mois": int(holidays_stats.get(email, 0)),
+            "Fériés année": int(holidays_year.get(email, 0)),
             "Cumul année": int(cumul_locked.get(email, 0)) + adjustment,
             "Aperçu": int(cumul_preview.get(email, 0)) + adjustment,
             "Corr. cumul": adjustment,
@@ -64,11 +67,13 @@ def _build_rows(users, blocks, year, month, weekends_stats, holidays_stats,
     return rows
 
 
-def _render_cards(df, year, ref_month_name, locked_count):
+def _render_cards(df, year, month_name, ref_month_name, locked_count):
     total_contract = int(df["Contrat"].sum())
     total_retained = int(df["Heures mois"].sum())
     total_gap = total_retained - total_contract
     total_cumul = int(df["Cumul année"].sum())
+    total_we = int(df["WE année"].sum())
+    total_hol = int(df["Fériés année"].sum())
 
     gap_col = gap_color(total_gap)
     sub = (f"arrêté à {ref_month_name.lower()}" if ref_month_name
@@ -79,32 +84,43 @@ def _render_cards(df, year, ref_month_name, locked_count):
         f'<div class="pl-card"><div class="pl-card-l">Cumul validé {year}</div>'
         f'<div class="pl-card-v">{total_cumul} h</div>'
         f'<div class="pl-card-s">{sub} · {locked_count} mois</div></div>'
-        f'<div class="pl-card"><div class="pl-card-l">Contrat du mois</div>'
+        f'<div class="pl-card"><div class="pl-card-l">'
+        f'Contrat {month_name.lower()}</div>'
         f'<div class="pl-card-v">{total_contract} h</div>'
         f'<div class="pl-card-s">{len(df)} collaborateur(s)</div></div>'
-        f'<div class="pl-card"><div class="pl-card-l">Écart du mois</div>'
+        f'<div class="pl-card"><div class="pl-card-l">'
+        f'Écart {month_name.lower()}</div>'
         f'<div class="pl-card-v" style="color:{gap_col}">{total_gap:+d} h</div>'
         f'<div class="pl-card-s">{total_retained} h retenues</div></div>'
+        f'<div class="pl-card"><div class="pl-card-l">Week-ends {year}</div>'
+        f'<div class="pl-card-v">{total_we}</div>'
+        f'<div class="pl-card-s">jours travaillés</div></div>'
+        f'<div class="pl-card"><div class="pl-card-l">Fériés {year}</div>'
+        f'<div class="pl-card-v">{total_hol}</div>'
+        f'<div class="pl-card-s">jours travaillés</div></div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
 
-def _render_readonly(df, theme):
+def _render_readonly(df, theme, year, month_name):
     """
     Vue lecture seule pour les non-admins.
     Tableau sur grand écran, cartes empilées sur mobile :
     les deux sont émis, le CSS n'en montre qu'un.
     """
     head = (
-        '<div class="pl-tr pl-th">'
-        '<div>Collaborateur</div>'
-        '<div style="text-align:right">Contrat</div>'
-        '<div style="text-align:right">Retenu</div>'
-        '<div style="text-align:right">Écart</div>'
-        '<div style="text-align:right">WE</div>'
-        '<div style="text-align:right">Fériés</div>'
-        '<div>Taux</div></div>'
+        f'<div class="pl-tr pl-th">'
+        f'<div>Collaborateur</div>'
+        f'<div style="text-align:right">Contrat</div>'
+        f'<div style="text-align:right">Retenu</div>'
+        f'<div style="text-align:right">Écart</div>'
+        f'<div style="text-align:right">WE<br>'
+        f'<span style="font-size:9px">mois · an</span></div>'
+        f'<div style="text-align:right">Fériés<br>'
+        f'<span style="font-size:9px">mois · an</span></div>'
+        f'<div style="text-align:right">Cumul {year}</div>'
+        f'<div>Taux</div></div>'
     )
 
     rows_html = []
@@ -128,9 +144,11 @@ def _render_readonly(df, theme):
             f'{int(r["Contrat"])} h</div>'
             f'<div style="text-align:right">{int(r["Heures mois"])} h</div>'
             f'<div style="text-align:right;color:{gap_col}">{gap:+d} h</div>'
-            f'<div style="text-align:right;color:{TEXT_SOFT}">{int(r["WE"])}</div>'
-            f'<div style="text-align:right;color:{TEXT_SOFT}">'
-            f'{int(r["Fériés"])}</div>'
+            f'<div style="text-align:right">{int(r["WE mois"])} · '
+            f'<span style="color:{TEXT_SOFT}">{int(r["WE année"])}</span></div>'
+            f'<div style="text-align:right">{int(r["Fériés mois"])} · '
+            f'<span style="color:{TEXT_SOFT}">{int(r["Fériés année"])}</span></div>'
+            f'<div style="text-align:right">{int(r["Cumul année"])} h</div>'
             f'<div style="display:flex;align-items:center;gap:9px">'
             f'<span class="pl-bar"><span style="width:{width}%;'
             f'background:{bar}"></span></span>'
@@ -155,10 +173,14 @@ def _render_readonly(df, theme):
             f'<span style="font-size:10px;color:{TEXT_SOFT}">'
             f'{pct:.0f} %</span></div>'
             f'<div class="pl-ucard-meta">'
-            f'<span>Contrat {int(r["Contrat"])} h</span>'
-            f'<span>Retenu {int(r["Heures mois"])} h</span>'
-            f'<span>WE {int(r["WE"])}</span>'
-            f'<span>Fériés {int(r["Fériés"])}</span></div>'
+            f'<span>{month_name} : {int(r["Heures mois"])} h '
+            f'/ {int(r["Contrat"])} h</span>'
+            f'<span>Cumul {year} : {int(r["Cumul année"])} h</span></div>'
+            f'<div class="pl-ucard-meta">'
+            f'<span>WE {int(r["WE mois"])} mois · '
+            f'{int(r["WE année"])} an</span>'
+            f'<span>Fériés {int(r["Fériés mois"])} mois · '
+            f'{int(r["Fériés année"])} an</span></div>'
             f'</div>'
         )
 
@@ -173,12 +195,14 @@ def _render_editor(df, year, month, month_name):
     """Tableau éditable, pour l'admin."""
     st.caption(
         "Les colonnes « Heures retenues » et « Corr. cumul » sont "
-        "modifiables directement. Pensez à enregistrer."
+        "modifiables directement. Les colonnes annuelles cumulent "
+        "les mois verrouillés depuis janvier."
     )
 
     visible = [
         "Collaborateur", "Contrat", "Réalisé", "Heures mois", "Écart",
-        "Taux", "WE", "Fériés", "Cumul année", "Aperçu", "Corr. cumul",
+        "Taux", "WE mois", "WE année", "Fériés mois", "Fériés année",
+        "Cumul année", "Aperçu", "Corr. cumul",
     ]
 
     edited = st.data_editor(
@@ -201,8 +225,22 @@ def _render_editor(df, year, month, month_name):
             "Taux": st.column_config.ProgressColumn(
                 "Taux", min_value=0, max_value=150, format="%.0f%%",
             ),
-            "WE": st.column_config.NumberColumn("WE", format="%d"),
-            "Fériés": st.column_config.NumberColumn("Fériés", format="%d"),
+            "WE mois": st.column_config.NumberColumn(
+                "WE mois", format="%d",
+                help=f"Samedis et dimanches travaillés en {month_name}",
+            ),
+            "WE année": st.column_config.NumberColumn(
+                f"WE {year}", format="%d",
+                help="Cumul sur les mois verrouillés depuis janvier",
+            ),
+            "Fériés mois": st.column_config.NumberColumn(
+                "Fériés mois", format="%d",
+                help=f"Jours fériés travaillés en {month_name}",
+            ),
+            "Fériés année": st.column_config.NumberColumn(
+                f"Fériés {year}", format="%d",
+                help="Cumul sur les mois verrouillés depuis janvier",
+            ),
             "Cumul année": st.column_config.NumberColumn(
                 f"Cumul {year}", format="%d h",
             ),
@@ -214,8 +252,9 @@ def _render_editor(df, year, month, month_name):
             ),
         },
         disabled=[
-            "Collaborateur", "Contrat", "Réalisé", "Écart",
-            "Taux", "WE", "Fériés", "Cumul année", "Aperçu",
+            "Collaborateur", "Contrat", "Réalisé", "Écart", "Taux",
+            "WE mois", "WE année", "Fériés mois", "Fériés année",
+            "Cumul année", "Aperçu",
         ],
         key=f"hours_editor_{year}_{month}",
     )
@@ -277,6 +316,8 @@ def render_hours_dashboard(
     pending_months: list,
     weekends_stats: dict,
     holidays_stats: dict,
+    weekends_year: dict,
+    holidays_year: dict,
     cumul_locked: dict,
     cumul_preview: dict,
     admin: bool,
@@ -284,12 +325,15 @@ def render_hours_dashboard(
 ):
     """
     Synthèse des heures : cartes de totaux, puis détail.
-    Lecture seule (HTML responsive) pour les collaborateurs,
-    éditable (data_editor) pour l'administrateur.
+
+    Chaque compteur existe en version mensuelle (le mois analysé)
+    et annuelle (cumul des mois verrouillés depuis janvier), pour
+    les heures comme pour les week-ends et les jours fériés.
     """
     rows = _build_rows(
         users, blocks, year, month, weekends_stats, holidays_stats,
-        cumul_locked, cumul_preview, admin, current_email,
+        weekends_year, holidays_year, cumul_locked, cumul_preview,
+        admin, current_email,
     )
 
     if not rows:
@@ -298,7 +342,7 @@ def render_hours_dashboard(
 
     df = pd.DataFrame(rows).sort_values("Écart").reset_index(drop=True)
 
-    _render_cards(df, year, ref_month_name, locked_count)
+    _render_cards(df, year, month_name, ref_month_name, locked_count)
 
     if pending_months:
         st.caption(
@@ -309,4 +353,4 @@ def render_hours_dashboard(
     if admin:
         _render_editor(df, year, month, month_name)
     else:
-        _render_readonly(df, theme)
+        _render_readonly(df, theme, year, month_name)

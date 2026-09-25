@@ -23,6 +23,7 @@ from components.calendar_availability import (
     render_availability_static,
     render_availability_editor,
 )
+from holidays_fr import french_holidays, holidays_of_month
 from planner_engine import generate_planning
 from planning_exports import export_planning_excel_calendar_colored
 from planning_exports import export_planning_ical
@@ -58,6 +59,27 @@ st.set_page_config(
 
 inject_css()
 inject_availability_css()
+
+# Repère visuel des jours fériés
+HOLIDAY_LINE = "#BA7517"
+
+st.markdown(
+    f"""
+<style>
+.pl-holiday {{box-shadow: inset 0 0 0 2px {HOLIDAY_LINE};}}
+.pl-hol-list {{
+  font-size: 11px; color: {TEXT_SOFT};
+  margin-top: 10px; display: flex; gap: 14px; flex-wrap: wrap;
+}}
+.pl-hol-list b {{color: {HOLIDAY_LINE}; font-weight: 500;}}
+@media (max-width: 640px) {{
+  .pl-holiday {{box-shadow: inset 0 0 0 1.5px {HOLIDAY_LINE};}}
+  .pl-hol-list {{font-size: 10px; gap: 10px;}}
+}}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 # Amplitude 9h → 19h, 1h de repas non comptabilisée
 HOURS_PER_DAY = 9
@@ -139,46 +161,13 @@ def month_hours_for_user(users: dict, user_email: str, year: int, month: int,
     return int(override) if override is not None else int(computed_hours)
 
 
-def compute_year_cumulative(users: dict, year: int, up_to_month: int,
-                            only_locked: bool):
-    cumulative = {}
-    months_used = []
-
-    for m in range(1, up_to_month + 1):
-        proposals = load_planning_proposals(year, m)
-        proposal = proposals.get("current")
-        if not proposal:
-            continue
-        if only_locked and not proposal.get("locked"):
-            continue
-
-        months_used.append(m)
-        stats = compute_hours(proposal["planning"]["blocks"])
-
-        for user_email in users:
-            computed = stats.get(user_email, {}).get("hours", 0)
-            retained = month_hours_for_user(users, user_email, year, m, computed)
-            if retained:
-                cumulative[user_email] = cumulative.get(user_email, 0) + retained
-
-    return cumulative, months_used
-
-
-def last_locked_month(year: int) -> int | None:
-    for m in range(12, 0, -1):
-        proposals = load_planning_proposals(year, m)
-        proposal = proposals.get("current")
-        if proposal and proposal.get("locked"):
-            return m
-    return None
-
-
 def compute_weekends_and_holidays(blocks, year: int, month: int):
-    FIXED_HOLIDAYS = {
-        dt.date(year, 1, 1), dt.date(year, 5, 1), dt.date(year, 5, 8),
-        dt.date(year, 7, 14), dt.date(year, 8, 15), dt.date(year, 11, 1),
-        dt.date(year, 11, 11), dt.date(year, 12, 25),
-    }
+    """
+    Week-ends et jours fériés travaillés, par collaborateur.
+    Les jours fériés incluent les fêtes mobiles (Pâques, Ascension,
+    Pentecôte), calculées dans holidays_fr.
+    """
+    holidays = french_holidays(year)
 
     weekends_count = {}
     holidays_count = {}
@@ -193,10 +182,64 @@ def compute_weekends_and_holidays(blocks, year: int, month: int):
                 continue
             if day.weekday() >= 5:
                 weekends_count[user] = weekends_count.get(user, 0) + 1
-            if day in FIXED_HOLIDAYS:
+            if day in holidays:
                 holidays_count[user] = holidays_count.get(user, 0) + 1
 
     return weekends_count, holidays_count
+
+
+def compute_year_cumulative(users: dict, year: int, up_to_month: int,
+                            only_locked: bool):
+    """
+    Cumul annuel par collaborateur, de janvier jusqu'au mois demandé.
+
+    Retourne (heures, week-ends, fériés, mois retenus). Les trois
+    compteurs portent sur la même période, pour rester cohérents
+    entre eux.
+    """
+    hours = {}
+    weekends = {}
+    holidays = {}
+    months_used = []
+
+    for m in range(1, up_to_month + 1):
+        proposals = load_planning_proposals(year, m)
+        proposal = proposals.get("current")
+        if not proposal:
+            continue
+        if only_locked and not proposal.get("locked"):
+            continue
+
+        months_used.append(m)
+        blocks = proposal["planning"]["blocks"]
+        stats = compute_hours(blocks)
+        we_m, hol_m = compute_weekends_and_holidays(blocks, year, m)
+
+        for user_email in users:
+            computed = stats.get(user_email, {}).get("hours", 0)
+            retained = month_hours_for_user(users, user_email, year, m, computed)
+            if retained:
+                hours[user_email] = hours.get(user_email, 0) + retained
+
+            if we_m.get(user_email):
+                weekends[user_email] = (
+                    weekends.get(user_email, 0) + we_m[user_email]
+                )
+            if hol_m.get(user_email):
+                holidays[user_email] = (
+                    holidays.get(user_email, 0) + hol_m[user_email]
+                )
+
+    return hours, weekends, holidays, months_used
+
+
+def last_locked_month(year: int) -> int | None:
+    for m in range(12, 0, -1):
+        proposals = load_planning_proposals(year, m)
+        proposal = proposals.get("current")
+        if proposal and proposal.get("locked"):
+            return m
+    return None
 
 
 def build_day_map(blocks, year: int, month: int) -> dict:
@@ -220,6 +263,7 @@ def render_calendar(*, users, theme, day_map, year, month,
                     show_stats=True):
     cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(year, month)
+    holidays = holidays_of_month(year, month)
 
     parts = ['<div class="pl-grid">']
     parts += dow_header()
@@ -228,6 +272,7 @@ def render_calendar(*, users, theme, day_map, year, month,
 
     covered = 0
     total = 0
+    worked_holidays = 0
 
     for week in weeks:
         for day in week:
@@ -239,20 +284,28 @@ def render_calendar(*, users, theme, day_map, year, month,
 
             total += 1
             assigned = day_map.get(day.isoformat())
+            holiday_name = holidays.get(day)
+
+            extra_class = " pl-holiday" if holiday_name else ""
+            tooltip = f' title="{esc(holiday_name)}"' if holiday_name else ""
 
             if assigned:
                 covered += 1
+                if holiday_name:
+                    worked_holidays += 1
                 c = theme.get(assigned, {"bg": "#D3D1C7", "fg": "#2C2C2A",
                                          "dim": "#5F5E5A"})
                 parts.append(
-                    f'<div class="pl-cell" style="background:{c["bg"]}">'
+                    f'<div class="pl-cell{extra_class}"{tooltip} '
+                    f'style="background:{c["bg"]}">'
                     f'<div class="pl-num" style="color:{c["dim"]}">{day.day}</div>'
                     f'{name_cell(short_name(users, assigned), c["fg"])}'
                     f'</div>'
                 )
             else:
                 parts.append(
-                    f'<div class="pl-cell" style="background:{DANGER_BG};'
+                    f'<div class="pl-cell{extra_class}"{tooltip} '
+                    f'style="background:{DANGER_BG};'
                     f'border:1.5px dashed {DANGER_LINE}">'
                     f'<div class="pl-num" style="color:{DANGER_FG}">{day.day}</div>'
                     f'<div class="pl-name" style="color:{DANGER_FG}">'
@@ -261,6 +314,13 @@ def render_calendar(*, users, theme, day_map, year, month,
                 )
 
     parts.append("</div>")
+
+    if holidays:
+        items = "".join(
+            f'<span><b>{d.day}</b> {esc(name)}</span>'
+            for d, name in holidays.items()
+        )
+        parts.append(f'<div class="pl-hol-list">{items}</div>')
 
     if show_legend:
         present = sorted({u for u in day_map.values() if u})
@@ -281,16 +341,25 @@ def render_calendar(*, users, theme, day_map, year, month,
         hours = covered * HOURS_PER_DAY
         missing = total - covered
         miss_color = DANGER_FG if missing else TEXT
-        parts.append(
-            f'<div class="pl-stats">'
+
+        stats = (
             f'<div><div class="pl-stat-l">Couverture</div>'
             f'<div class="pl-stat-v">{rate} %</div></div>'
             f'<div><div class="pl-stat-l">Heures</div>'
             f'<div class="pl-stat-v">{hours} h</div></div>'
             f'<div><div class="pl-stat-l">Non couverts</div>'
-            f'<div class="pl-stat-v" style="color:{miss_color}">{missing} j</div></div>'
-            f'</div>'
+            f'<div class="pl-stat-v" style="color:{miss_color}">'
+            f'{missing} j</div></div>'
         )
+
+        if holidays:
+            stats += (
+                f'<div><div class="pl-stat-l">Fériés travaillés</div>'
+                f'<div class="pl-stat-v" style="color:{HOLIDAY_LINE}">'
+                f'{worked_holidays}/{len(holidays)}</div></div>'
+            )
+
+        parts.append(f'<div class="pl-stats">{stats}</div>')
 
     st.markdown("".join(parts), unsafe_allow_html=True)
 
@@ -438,6 +507,7 @@ with tab_feed:
         proposals = load_planning_proposals(y, m)
         proposal = proposals.get("current")
         forced = load_forced_assignments(y, m) or {}
+        month_holidays = holidays_of_month(y, m)
 
         # ---------- En-tête du mois ----------
         if locked:
@@ -516,6 +586,12 @@ with tab_feed:
                          key=f"edit_{y}_{m}", use_container_width=True):
                 st.session_state.av_edit = (y, m)
                 st.rerun()
+
+        if month_holidays:
+            items = " · ".join(
+                f"{d.day} {name}" for d, name in month_holidays.items()
+            )
+            st.caption(f"Jours fériés ce mois-ci : {items}")
 
         # ---------- Actions administrateur ----------
         if admin:
@@ -622,6 +698,7 @@ with tab_admin:
         weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(
             year_admin, month_admin
         )
+        admin_holidays = holidays_of_month(year_admin, month_admin)
 
         parts = ['<div class="pl-wrap"><div class="pl-grid">']
         parts += dow_header()
@@ -636,6 +713,10 @@ with tab_admin:
                     )
                     continue
 
+                holiday_name = admin_holidays.get(day)
+                extra = " pl-holiday" if holiday_name else ""
+                tooltip = f' title="{esc(holiday_name)}"' if holiday_name else ""
+
                 inner = ""
                 for u in dispo_by_day.get(day.isoformat(), []):
                     c = theme.get(u, {})
@@ -647,13 +728,22 @@ with tab_admin:
                     )
 
                 parts.append(
-                    f'<div class="pl-cell" style="background:{CARD};'
-                    f'min-height:78px">'
+                    f'<div class="pl-cell{extra}"{tooltip} '
+                    f'style="background:{CARD};min-height:78px">'
                     f'<div class="pl-num" style="color:{TEXT_MUTED}">'
                     f'{day.day}</div>{inner}</div>'
                 )
 
-        parts.append("</div></div>")
+        parts.append("</div>")
+
+        if admin_holidays:
+            items = "".join(
+                f'<span><b>{d.day}</b> {esc(name)}</span>'
+                for d, name in admin_holidays.items()
+            )
+            parts.append(f'<div class="pl-hol-list">{items}</div>')
+
+        parts.append("</div>")
         st.markdown("".join(parts), unsafe_allow_html=True)
 
 
@@ -674,9 +764,28 @@ with tab_rules:
     <div>Respect strict des disponibilités saisies</div>
     <div>Le forçage administrateur est prioritaire</div>
     <div>Tous les collaborateurs doivent apparaître au planning</div>
+    <div>Les jours fériés sont signalés mais restent travaillables</div>
   </div>
 </div>
 """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+
+    year_hol = st.selectbox("Jours fériés de l'année", YEARS, index=0,
+                            key="hol_year")
+
+    rows = "".join(
+        f'<div style="display:flex;gap:12px;padding:3px 0;font-size:13px">'
+        f'<span style="color:{HOLIDAY_LINE};min-width:88px">'
+        f'{d.strftime("%d/%m/%Y")}</span>'
+        f'<span style="color:{TEXT}">{esc(name)}</span></div>'
+        for d, name in french_holidays(year_hol).items()
+    )
+
+    st.markdown(
+        f'<div class="pl-wrap" style="max-width:640px">{rows}</div>',
         unsafe_allow_html=True,
     )
 
@@ -699,10 +808,10 @@ with tab_hours:
     ref_month = last_locked_month(year_h)
     cumul_up_to = ref_month or 12
 
-    cumul_locked, locked_months = compute_year_cumulative(
+    cumul_locked, we_locked, hol_locked, locked_months = compute_year_cumulative(
         users, year_h, cumul_up_to, only_locked=True
     )
-    cumul_preview, preview_months = compute_year_cumulative(
+    cumul_preview, we_preview, hol_preview, preview_months = compute_year_cumulative(
         users, year_h, 12, only_locked=False
     )
 
@@ -722,6 +831,13 @@ with tab_hours:
         blocks_h, year_h, month_h
     )
 
+    hol_month = holidays_of_month(year_h, month_h)
+    if hol_month:
+        items = " · ".join(f"{d.day} {name}" for d, name in hol_month.items())
+        st.caption(f"Jours fériés ce mois-ci : {items}")
+    else:
+        st.caption("Aucun jour férié ce mois-ci.")
+
     if not blocks_h:
         st.info(
             f"Aucun planning généré pour {month_label(month_h)} {year_h}."
@@ -740,6 +856,8 @@ with tab_hours:
                         if m not in locked_months],
         weekends_stats=weekends_stats,
         holidays_stats=holidays_stats,
+        weekends_year=we_locked,
+        holidays_year=hol_locked,
         cumul_locked=cumul_locked,
         cumul_preview=cumul_preview,
         admin=admin,
