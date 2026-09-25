@@ -1,4 +1,3 @@
-cat > .streamlit/config.toml << 'EOF'
 [theme]
 base = "dark"
 primaryColor = "#378ADD"
@@ -9,4 +8,3 @@ font = "sans serif"
 
 [client]
 toolbarMode = "minimal"
-EOF

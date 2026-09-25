@@ -25,35 +25,33 @@ def daterange(start: dt.date, end: dt.date):
 
 
 def month_blocks(year: int, month: int):
+    """
+    Découpe le mois en blocs semaine (lundi-jeudi) et week-end
+    (vendredi-dimanche).
+
+    Un bloc appartient au mois de son PREMIER jour et reste entier,
+    même s'il déborde sur le mois suivant : un week-end à cheval
+    garde ainsi un seul titulaire. Les jours de début de mois qui
+    appartiennent au dernier bloc du mois précédent sont couverts
+    par le planning de ce mois-là, pas par celui-ci.
+    """
     cal = calendar.Calendar(firstweekday=0)
-    weeks = cal.monthdatescalendar(year, month)
 
     blocks = []
     block_id = 1
 
-    for week in weeks:
-        week_days = week[0:4]
-        if any(d.month == month for d in week_days):
-            start, end = week_days[0], week_days[-1]
-            blocks.append({
-                "id": block_id,
-                "type": "week",
-                "start": start,
-                "end": end,
-                "days": [d.isoformat() for d in daterange(start, end)],
-                "assigned_to": None,
-            })
-            block_id += 1
+    for week in cal.monthdatescalendar(year, month):
+        for kind, span in (("week", week[0:4]), ("weekend", week[4:7])):
+            # Le bloc n'appartient à ce mois que si son premier jour y est.
+            if span[0].year != year or span[0].month != month:
+                continue
 
-        weekend_days = week[4:7]
-        if any(d.month == month for d in weekend_days):
-            start, end = weekend_days[0], weekend_days[-1]
             blocks.append({
                 "id": block_id,
-                "type": "weekend",
-                "start": start,
-                "end": end,
-                "days": [d.isoformat() for d in daterange(start, end)],
+                "type": kind,
+                "start": span[0],
+                "end": span[-1],
+                "days": [d.isoformat() for d in span],
                 "assigned_to": None,
             })
             block_id += 1

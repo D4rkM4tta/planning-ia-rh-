@@ -21,6 +21,7 @@ db = firestore.client()
 USERS = db.collection("users")
 PROPOSALS = db.collection("planning_proposals")
 FORCED = db.collection("forced_assignments")
+OVERRIDES = db.collection("day_overrides")
 
 
 # ============================================================
@@ -188,6 +189,43 @@ def load_forced_assignments(year: int, month: int) -> dict:
 def invalidate_forced_cache() -> None:
     """À appeler après toute écriture sur un forçage."""
     load_forced_assignments.clear()
+
+
+# ============================================================
+# RETOUCHES MANUELLES (ADMIN)
+# ============================================================
+def save_day_override(
+    year: int,
+    month: int,
+    day_iso: str,
+    email: str | None,
+) -> None:
+    """
+    Retouche d'un jour, prioritaire sur le planning généré.
+
+    Elle s'applique même à un planning verrouillé, sans le régénérer.
+      email = None  → retire la retouche (retour au planning généré)
+      email = ""    → le jour est laissé sans titulaire
+      email = <adr> → le jour est attribué à ce collaborateur
+    """
+    ref = OVERRIDES.document(f"{year}_{month}")
+    if email is None:
+        ref.set({day_iso: firestore.DELETE_FIELD}, merge=True)
+    else:
+        ref.set({day_iso: normalize_email(email)}, merge=True)
+    invalidate_overrides_cache()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_day_overrides(year: int, month: int) -> dict:
+    """Retouches d'un mois, {jour_iso: email}. Chaîne vide = sans titulaire."""
+    doc = OVERRIDES.document(f"{year}_{month}").get()
+    return doc.to_dict() if doc.exists else {}
+
+
+def invalidate_overrides_cache() -> None:
+    """À appeler après toute écriture sur une retouche."""
+    load_day_overrides.clear()
 
 
 # ============================================================

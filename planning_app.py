@@ -15,6 +15,8 @@ from firebase_client import (
     save_planning_proposal,
     set_planning_lock,
     is_planning_locked,
+    load_day_overrides,
+    save_day_override,
 )
 
 from components.calendar_availability import (
@@ -23,7 +25,7 @@ from components.calendar_availability import (
     render_availability_static,
     render_availability_editor,
 )
-from holidays_fr import french_holidays, holidays_of_month
+from holidays_fr import french_holidays, holidays_of_month, is_holiday
 from planner_engine import generate_planning
 from planning_exports import export_planning_excel_calendar_colored
 from planning_exports import export_planning_ical
@@ -164,11 +166,11 @@ def month_hours_for_user(users: dict, user_email: str, year: int, month: int,
 def compute_weekends_and_holidays(blocks, year: int, month: int):
     """
     Week-ends et jours fériés travaillés, par collaborateur.
-    Les jours fériés incluent les fêtes mobiles (Pâques, Ascension,
-    Pentecôte), calculées dans holidays_fr.
-    """
-    holidays = french_holidays(year)
 
+    Seuls les jours du mois sont comptés : les compteurs portent sur
+    les jours du calendrier, comme les heures. Les jours fériés
+    incluent les fêtes mobiles.
+    """
     weekends_count = {}
     holidays_count = {}
 
@@ -182,7 +184,7 @@ def compute_weekends_and_holidays(blocks, year: int, month: int):
                 continue
             if day.weekday() >= 5:
                 weekends_count[user] = weekends_count.get(user, 0) + 1
-            if day in holidays:
+            if is_holiday(day):
                 holidays_count[user] = holidays_count.get(user, 0) + 1
 
     return weekends_count, holidays_count
@@ -211,7 +213,7 @@ def compute_year_cumulative(users: dict, year: int, up_to_month: int,
             continue
 
         months_used.append(m)
-        blocks = proposal["planning"]["blocks"]
+        blocks = day_map_as_blocks(month_day_map(year, m))
         stats = compute_hours(blocks)
         we_m, hol_m = compute_weekends_and_holidays(blocks, year, m)
 
@@ -242,6 +244,108 @@ def last_locked_month(year: int) -> int | None:
     return None
 
 
+def next_month(year: int, month: int):
+    return (year + 1, 1) if month == 12 else (year, month + 1)
+
+
+def prev_month(year: int, month: int):
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def owner_month(day_iso: str):
+    """
+    Mois propriétaire du bloc contenant ce jour.
+    Un bloc appartient au mois de son premier jour : lundi pour une
+    semaine, vendredi pour un week-end.
+    """
+    d = dt.date.fromisoformat(day_iso)
+    monday = d - dt.timedelta(days=d.weekday())
+    first = monday if d.weekday() <= 3 else monday + dt.timedelta(days=4)
+    return first.year, first.month
+
+
+def blocks_covering_month(year: int, month: int) -> list:
+    """
+    Tous les blocs qui couvrent des jours de ce mois : ceux du mois
+    lui-même, plus le dernier bloc du mois précédent quand il déborde.
+    """
+    out = []
+
+    py, pm = prev_month(year, month)
+    previous = load_planning_proposals(py, pm).get("current")
+    if previous:
+        out.extend(previous["planning"]["blocks"])
+
+    current = load_planning_proposals(year, month).get("current")
+    if current:
+        out.extend(current["planning"]["blocks"])
+
+    return out
+
+
+def generation_availability(users: dict, year: int, month: int) -> dict:
+    """
+    Disponibilités utilisables pour générer ce mois : celles du mois
+    et celles du mois suivant, car le dernier bloc peut déborder.
+    """
+    ny, nm = next_month(year, month)
+    return {
+        u: {
+            **normalize_availability(load_availability(u, year, month)),
+            **normalize_availability(load_availability(u, ny, nm)),
+        }
+        for u in users
+    }
+
+
+def generation_forced(year: int, month: int) -> dict:
+    """
+    Forçages utilisables pour générer ce mois. Ceux du mois suivant
+    sont inclus pour le bloc qui déborde ; les autres sont ignorés,
+    aucun bloc de ce mois ne les contenant.
+    """
+    ny, nm = next_month(year, month)
+    merged = dict(load_forced_assignments(year, month) or {})
+    merged.update(load_forced_assignments(ny, nm) or {})
+    return merged
+
+
+def stale_forced_days(day_map: dict, forced: dict) -> list:
+    """
+    Jours forcés que le planning affiché ne respecte pas.
+
+    Un forçage n'agit qu'au moment de la génération : forcer un jour
+    ne modifie pas un planning déjà produit.
+    """
+    return sorted(d for d, who in forced.items() if day_map.get(d) != who)
+
+
+def stale_warning(day_map: dict, forced: dict, year: int, month: int) -> None:
+    """Avertit l'administrateur des forçages non appliqués."""
+    stale = stale_forced_days(day_map, forced)
+    if not stale:
+        return
+
+    ailleurs = sorted({
+        owner_month(d) for d in stale if owner_month(d) != (year, month)
+    })
+    detail = ""
+    if ailleurs:
+        noms = ", ".join(f"{month_label(mm)} {yy}" for yy, mm in ailleurs)
+        detail = (
+            f" Certains de ces jours appartiennent au bloc d'un autre mois "
+            f"({noms}) : c'est ce planning-là qu'il faut régénérer."
+        )
+
+    jours = ", ".join(
+        dt.date.fromisoformat(d).strftime("%d/%m") for d in stale
+    )
+    st.warning(
+        f"{len(stale)} forçage(s) non appliqué(s) ({jours}). Un forçage "
+        f"n'agit qu'à la génération : régénérez le planning.{detail}"
+    )
+
+
 def build_day_map(blocks, year: int, month: int) -> dict:
     day_map = {}
     for block in blocks:
@@ -253,6 +357,42 @@ def build_day_map(blocks, year: int, month: int) -> dict:
                 day_map[cur.isoformat()] = block["assigned_to"]
             cur += dt.timedelta(days=1)
     return day_map
+
+
+def month_day_map(year: int, month: int) -> dict:
+    """
+    Qui travaille chaque jour du mois — source unique de vérité.
+
+    Sert à l'affichage, aux exports et à tous les compteurs. On part
+    des blocs (ceux du mois et le bloc débordant du mois précédent),
+    puis on applique les retouches de l'administrateur, qui priment.
+    """
+    day_map = build_day_map(blocks_covering_month(year, month), year, month)
+    for day, who in (load_day_overrides(year, month) or {}).items():
+        if who:
+            day_map[day] = who
+        else:
+            day_map.pop(day, None)
+    return day_map
+
+
+def day_map_as_blocks(day_map: dict) -> list:
+    """
+    Présente une carte jour → collaborateur sous forme de blocs d'un
+    jour, le format qu'attendent les exports et le tableau des heures.
+    """
+    return [
+        {
+            "id": i,
+            "type": "day",
+            "start": dt.date.fromisoformat(d),
+            "end": dt.date.fromisoformat(d),
+            "days": [d],
+            "assigned_to": who,
+        }
+        for i, (d, who) in enumerate(sorted(day_map.items()))
+        if who
+    ]
 
 
 # ============================================================
@@ -471,18 +611,177 @@ tab_feed, tab_admin, tab_rules, tab_hours = st.tabs([
 # ============================================================
 def months_to_show():
     """
-    Mois verrouillés (y compris passés) + tous les mois à venir,
-    dans l'ordre chronologique.
+    Mois ayant un planning (verrouillé ou non) + tous les mois à
+    venir, dans l'ordre chronologique.
+
+    Un mois reste affiché dès qu'il a un planning : le déverrouiller
+    ne doit pas le faire sortir du fil, sinon il devient inaccessible
+    et ne peut plus être reverrouillé.
     """
     today = dt.date.today()
     out = []
     for y in YEARS:
         for m in range(1, 13):
-            locked = is_planning_locked(y, m)
+            proposal = load_planning_proposals(y, m).get("current")
+            locked = bool(proposal and proposal.get("locked"))
             upcoming = (y, m) >= (today.year, today.month)
-            if locked or upcoming:
+            if proposal or upcoming:
                 out.append((y, m, locked))
     return out
+
+
+def my_availability_section(y: int, m: int, forced: dict, editing) -> None:
+    """Grille de mes disponibilités, en lecture ou en saisie."""
+    stored = availability_of(users, current_email, y, m)
+
+    if editing == (y, m):
+        render_availability_editor(
+            email=current_email, year=y, month=m,
+            forced=forced, users=users,
+            save_fn=save_availability, stored_days=stored,
+        )
+        return
+
+    render_availability_static(
+        year=y, month=m, selected=stored, forced=forced, users=users,
+    )
+    if st.button("Modifier mes disponibilités",
+                 key=f"edit_{y}_{m}", use_container_width=True):
+        st.session_state.av_edit = (y, m)
+        st.rerun()
+
+
+def override_editor(y: int, m: int, day_map: dict) -> None:
+    """
+    Retouche d'un jour par l'administrateur, sans déverrouiller ni
+    régénérer. Sert d'abord à combler les jours restés non couverts.
+    """
+    overrides = load_day_overrides(y, m) or {}
+    last_day = calendar.monthrange(y, m)[1]
+    days = [dt.date(y, m, d) for d in range(1, last_day + 1)]
+    uncovered = [d for d in days if d.isoformat() not in day_map]
+
+    label = f"Retoucher un jour ({len(overrides)} retouche(s))"
+    if uncovered:
+        label += f" · {len(uncovered)} jour(s) non couvert(s)"
+
+    with st.expander(label):
+        st.caption(
+            "Une retouche modifie directement le planning, même verrouillé, "
+            "sans le régénérer. Elle prime sur la génération et entre dans "
+            "le calcul des heures."
+        )
+
+        if uncovered:
+            st.caption(
+                "Non couverts : "
+                + ", ".join(d.strftime("%d/%m") for d in uncovered)
+            )
+
+        c1, c2 = st.columns(2)
+        day = c1.date_input(
+            "Jour",
+            value=uncovered[0] if uncovered else days[0],
+            min_value=days[0],
+            max_value=days[-1],
+            format="DD/MM/YYYY",
+            key=f"ov_day_{y}_{m}",
+        )
+        dkey = day.isoformat()
+
+        emails = sorted(users, key=lambda e: display_name(users, e))
+        options = emails + [""]
+        current = day_map.get(dkey, "")
+
+        chosen = c2.selectbox(
+            "Collaborateur",
+            options=options,
+            index=options.index(current) if current in options
+            else len(options) - 1,
+            format_func=lambda e: display_name(users, e) if e
+            else "— Personne —",
+            key=f"ov_who_{y}_{m}_{dkey}",
+        )
+
+        origin = "retouche" if dkey in overrides else "planning généré"
+        now = display_name(users, current) if current else "non couvert"
+        st.caption(f"Actuellement le {day.strftime('%d/%m')} : {now} ({origin})")
+
+        b1, b2 = st.columns(2)
+        if b1.button("Appliquer", key=f"ov_apply_{y}_{m}",
+                     type="primary", use_container_width=True):
+            save_day_override(y, m, dkey, chosen)
+            st.rerun()
+
+        if dkey in overrides:
+            if b2.button("Retirer la retouche", key=f"ov_del_{y}_{m}",
+                         use_container_width=True):
+                save_day_override(y, m, dkey, None)
+                st.rerun()
+
+        if overrides:
+            lines = []
+            for d in sorted(overrides):
+                who = overrides[d]
+                name = display_name(users, who) if who else "non couvert"
+                pretty = dt.date.fromisoformat(d).strftime("%d/%m")
+                lines.append(
+                    f'<div style="font-size:12px;color:{TEXT_SOFT};'
+                    f'padding:2px 0">{pretty} — {esc(name)}</div>'
+                )
+            st.markdown("".join(lines), unsafe_allow_html=True)
+
+
+def forcing_editor(y: int, m: int, forced: dict) -> None:
+    """Forçage d'un jour : pris en compte à la prochaine génération."""
+    with st.expander(f"Forçage administrateur ({len(forced)} jour(s))"):
+        st.caption(
+            "Un forçage attribue d'office un bloc entier à un collaborateur "
+            "lors de la génération. Pour modifier un seul jour sans "
+            "régénérer, utilisez plutôt « Retoucher un jour »."
+        )
+
+        last_day = calendar.monthrange(y, m)[1]
+        f1, f2 = st.columns(2)
+
+        fday = f1.date_input(
+            "Jour", value=dt.date(y, m, 1),
+            min_value=dt.date(y, m, 1),
+            max_value=dt.date(y, m, last_day),
+            format="DD/MM/YYYY", key=f"fd_{y}_{m}",
+        )
+
+        emails = sorted(users, key=lambda e: display_name(users, e))
+        chosen = f2.selectbox(
+            "Collaborateur", options=emails,
+            format_func=lambda e: display_name(users, e),
+            key=f"fu_{y}_{m}",
+        )
+
+        dkey = fday.isoformat()
+        g1, g2 = st.columns(2)
+
+        if g1.button("Forcer ce jour", key=f"fb_{y}_{m}",
+                     use_container_width=True):
+            save_forced_assignment(y, m, dkey, chosen)
+            st.rerun()
+
+        if dkey in forced:
+            if g2.button("Annuler le forçage", key=f"ub_{y}_{m}",
+                         use_container_width=True):
+                save_forced_assignment(y, m, dkey, None)
+                st.rerun()
+
+        if forced:
+            lines = []
+            for d in sorted(forced):
+                who = display_name(users, forced[d])
+                pretty = dt.date.fromisoformat(d).strftime("%d/%m")
+                lines.append(
+                    f'<div style="font-size:12px;color:{TEXT_SOFT};'
+                    f'padding:2px 0">{pretty} — {esc(who)}</div>'
+                )
+            st.markdown("".join(lines), unsafe_allow_html=True)
 
 
 # ============================================================
@@ -504,10 +803,14 @@ with tab_feed:
         st.info("Aucun mois à afficher.")
 
     for y, m, locked in feed:
-        proposals = load_planning_proposals(y, m)
-        proposal = proposals.get("current")
+        proposal = load_planning_proposals(y, m).get("current")
         forced = load_forced_assignments(y, m) or {}
         month_holidays = holidays_of_month(y, m)
+
+        # Le planning est la vue principale dès qu'il est verrouillé,
+        # et pour l'administrateur dès qu'il existe. Les collaborateurs
+        # gardent leurs disponibilités tant que rien n'est verrouillé.
+        show_planning = bool(proposal) and (locked or admin)
 
         # ---------- En-tête du mois ----------
         if locked:
@@ -519,73 +822,61 @@ with tab_feed:
             month_header(f"{month_label(m)} {y}", "À venir",
                          NEUTRAL_BG, NEUTRAL_FG, top=26)
 
-        st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
+        # ---------- Le planning ----------
+        if show_planning:
+            day_map = month_day_map(y, m)
 
-        # ---------- Mois verrouillé : le planning ----------
-        if locked:
-            blocks_l = proposal["planning"]["blocks"]
+            st.markdown('<div class="pl-wrap">', unsafe_allow_html=True)
             render_calendar(
-                users=users, theme=theme,
-                day_map=build_day_map(blocks_l, y, m),
-                year=y, month=m, uncovered_label="—",
+                users=users, theme=theme, day_map=day_map,
+                year=y, month=m,
+                uncovered_label="—" if locked else "Non couvert",
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.download_button(
-                    label="Excel",
-                    data=export_planning_excel_calendar_colored(
-                        blocks=blocks_l, users=users,
-                        user_colors={e: c["dot"] for e, c in theme.items()},
-                        year=y, month=m,
-                    ),
-                    file_name=f"planning_{y}_{m:02d}.xlsx",
-                    mime=("application/vnd.openxmlformats-officedocument"
-                          ".spreadsheetml.sheet"),
-                    key=f"excel_{y}_{m}",
-                    use_container_width=True,
-                )
-            with col_b:
-                st.download_button(
-                    label="iCal",
-                    data=export_planning_ical(
-                        planning=proposal["planning"], users=users,
-                        year=y, month=m,
-                    ),
-                    file_name=f"planning_{y}_{m:02d}.ics",
-                    mime="text/calendar",
-                    key=f"ical_{y}_{m}",
-                    use_container_width=True,
-                )
+            if locked:
+                as_blocks = day_map_as_blocks(day_map)
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.download_button(
+                        label="Excel",
+                        data=export_planning_excel_calendar_colored(
+                            blocks=as_blocks, users=users,
+                            user_colors={e: c["dot"]
+                                         for e, c in theme.items()},
+                            year=y, month=m,
+                        ),
+                        file_name=f"planning_{y}_{m:02d}.xlsx",
+                        mime=("application/vnd.openxmlformats-officedocument"
+                              ".spreadsheetml.sheet"),
+                        key=f"excel_{y}_{m}",
+                        use_container_width=True,
+                    )
+                with col_b:
+                    st.download_button(
+                        label="iCal",
+                        data=export_planning_ical(
+                            planning={"blocks": as_blocks}, users=users,
+                            year=y, month=m,
+                        ),
+                        file_name=f"planning_{y}_{m:02d}.ics",
+                        mime="text/calendar",
+                        key=f"ical_{y}_{m}",
+                        use_container_width=True,
+                    )
 
             if admin:
-                if st.button("Déverrouiller", key=f"unlock_{y}_{m}"):
-                    set_planning_lock(y, m, False)
-                    st.rerun()
-            continue
+                stale_warning(day_map, forced, y, m)
+                override_editor(y, m, day_map)
 
-        # ---------- Mois à venir : mes disponibilités ----------
-        stored = availability_of(users, current_email, y, m)
-
-        if editing == (y, m):
-            render_availability_editor(
-                email=current_email, year=y, month=m,
-                forced=forced, users=users,
-                save_fn=save_availability, stored_days=stored,
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            render_availability_static(
-                year=y, month=m, selected=stored,
-                forced=forced, users=users,
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            if st.button("Modifier mes disponibilités",
-                         key=f"edit_{y}_{m}", use_container_width=True):
-                st.session_state.av_edit = (y, m)
-                st.rerun()
+        # ---------- Mes disponibilités (tant que non verrouillé) ----------
+        if not locked:
+            if show_planning:
+                with st.expander("Mes disponibilités",
+                                 expanded=(editing == (y, m))):
+                    my_availability_section(y, m, forced, editing)
+            else:
+                my_availability_section(y, m, forced, editing)
 
         if month_holidays:
             items = " · ".join(
@@ -594,85 +885,36 @@ with tab_feed:
             st.caption(f"Jours fériés ce mois-ci : {items}")
 
         # ---------- Actions administrateur ----------
-        if admin:
-            a1, a2 = st.columns(2)
+        if not admin:
+            continue
 
-            if a1.button("Générer le planning", key=f"gen_{y}_{m}",
-                         use_container_width=True):
-                availability_by_user = {
-                    u: normalize_availability(load_availability(u, y, m))
-                    for u in users
-                }
-                planning = generate_planning(
-                    year=y, month=m, users=users,
-                    availability_by_user=availability_by_user,
-                    forced_assignments=forced,
-                )
-                save_planning_proposal(y, m, "current", planning, current_email)
-                for warning in planning.get("warnings", []):
-                    st.warning(warning)
+        if locked:
+            if st.button("Déverrouiller", key=f"unlock_{y}_{m}"):
+                set_planning_lock(y, m, False)
+                st.rerun()
+            continue
+
+        a1, a2 = st.columns(2)
+
+        if a1.button("Générer le planning", key=f"gen_{y}_{m}",
+                     use_container_width=True):
+            planning = generate_planning(
+                year=y, month=m, users=users,
+                availability_by_user=generation_availability(users, y, m),
+                forced_assignments=generation_forced(y, m),
+            )
+            save_planning_proposal(y, m, "current", planning, current_email)
+            for warning in planning.get("warnings", []):
+                st.warning(warning)
+            st.rerun()
+
+        if proposal:
+            if a2.button("Verrouiller", key=f"lock_{y}_{m}",
+                         type="primary", use_container_width=True):
+                set_planning_lock(y, m, True, current_email)
                 st.rerun()
 
-            if proposal:
-                if a2.button("Verrouiller", key=f"lock_{y}_{m}",
-                             type="primary", use_container_width=True):
-                    set_planning_lock(y, m, True, current_email)
-                    st.rerun()
-
-            if proposal:
-                with st.expander("Voir le planning proposé"):
-                    render_calendar(
-                        users=users, theme=theme,
-                        day_map=build_day_map(
-                            proposal["planning"]["blocks"], y, m
-                        ),
-                        year=y, month=m,
-                    )
-
-            with st.expander(f"Forçage administrateur ({len(forced)} jour(s))"):
-                last_day = calendar.monthrange(y, m)[1]
-                f1, f2 = st.columns(2)
-
-                fday = f1.date_input(
-                    "Jour", value=dt.date(y, m, 1),
-                    min_value=dt.date(y, m, 1),
-                    max_value=dt.date(y, m, last_day),
-                    format="DD/MM/YYYY", key=f"fd_{y}_{m}",
-                )
-
-                labels = {
-                    info.get("name", mail.split("@")[0]): mail
-                    for mail, info in users.items()
-                }
-                chosen = f2.selectbox("Collaborateur", options=sorted(labels),
-                                      key=f"fu_{y}_{m}")
-
-                dkey = fday.isoformat()
-                g1, g2 = st.columns(2)
-
-                if g1.button("Forcer ce jour", key=f"fb_{y}_{m}",
-                             use_container_width=True):
-                    save_forced_assignment(y, m, dkey, labels[chosen])
-                    st.rerun()
-
-                if dkey in forced:
-                    if g2.button("Annuler le forçage", key=f"ub_{y}_{m}",
-                                 use_container_width=True):
-                        save_forced_assignment(y, m, dkey, None)
-                        st.rerun()
-
-                if forced:
-                    lines = []
-                    for d in sorted(forced):
-                        who = users.get(forced[d], {}).get(
-                            "name", forced[d].split("@")[0]
-                        )
-                        pretty = dt.date.fromisoformat(d).strftime("%d/%m")
-                        lines.append(
-                            f'<div style="font-size:12px;color:{TEXT_SOFT};'
-                            f'padding:2px 0">{pretty} — {esc(who)}</div>'
-                        )
-                    st.markdown("".join(lines), unsafe_allow_html=True)
+        forcing_editor(y, m, forced)
 
 
 # ============================================================
@@ -802,7 +1044,7 @@ with tab_hours:
 
     proposals_h = load_planning_proposals(year_h, month_h)
     proposal_h = proposals_h.get("current")
-    blocks_h = proposal_h["planning"]["blocks"] if proposal_h else []
+    blocks_h = day_map_as_blocks(month_day_map(year_h, month_h))
     month_is_locked = bool(proposal_h and proposal_h.get("locked"))
 
     ref_month = last_locked_month(year_h)
