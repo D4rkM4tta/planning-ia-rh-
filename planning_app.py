@@ -69,6 +69,9 @@ st.markdown(
     f"""
 <style>
 .pl-holiday {{box-shadow: inset 0 0 0 2px {HOLIDAY_LINE};}}
+.pl-pending {{outline: 2px dashed #EF9F27; outline-offset: -3px;}}
+.pl-conflict {{outline: 2px solid #E24B4A; outline-offset: -3px;}}
+.pl-mark-key {{font-size: 11px; color: {TEXT_SOFT}; margin-top: 8px;}}
 .pl-hol-list {{
   font-size: 11px; color: {TEXT_SOFT};
   margin-top: 10px; display: flex; gap: 14px; flex-wrap: wrap;
@@ -298,6 +301,126 @@ def generation_availability(users: dict, year: int, month: int) -> dict:
     }
 
 
+def iso_month(day_iso: str):
+    d = dt.date.fromisoformat(day_iso)
+    return d.year, d.month
+
+
+def has_declared(users: dict, email: str, year: int, month: int) -> bool:
+    """
+    Le collaborateur a-t-il déjà enregistré ses disponibilités de ce mois ?
+    Un enregistrement sans aucun jour coché compte : c'est une réponse.
+    """
+    info = users.get(email, {})
+    return bool(info.get(f"availability_saved_{year}_{month}")) or bool(
+        availability_of(users, email, year, month)
+    )
+
+
+def generation_pending(users: dict, year: int, month: int) -> dict:
+    """
+    Jours du mois suivant encore ouverts, par collaborateur : ceux de
+    quiconque n'a pas encore enregistré ce mois-là. Ils ne servent qu'à
+    couvrir un bloc à cheval, en dernier recours.
+    """
+    ny, nm = next_month(year, month)
+    last = calendar.monthrange(ny, nm)[1]
+    days = {dt.date(ny, nm, d).isoformat() for d in range(1, last + 1)}
+    return {u: days for u in users if not has_declared(users, u, ny, nm)}
+
+
+def confirmation_status(year: int, month: int):
+    """
+    Jours planifiés dont le titulaire n'a pas confirmé sa disponibilité,
+    pour ce mois et le débordement de ses propres blocs sur le suivant.
+
+    Renvoie deux dicts {jour: email} :
+      à confirmer — le titulaire n'a pas encore enregistré ce mois-là ;
+      conflit     — il l'a enregistré sans cocher ce jour.
+    Les décisions de l'administrateur (retouches, blocs forcés) et les
+    mois déjà écoulés ne sont jamais signalés.
+    """
+    today = dt.date.today()
+    if (year, month) < (today.year, today.month):
+        return {}, {}
+
+    days = dict(month_day_map(year, month))
+
+    own = load_planning_proposals(year, month).get("current")
+    if own:
+        ny, nm = next_month(year, month)
+        spill = {
+            d for b in own["planning"]["blocks"] if b.get("assigned_to")
+            for d in b["days"] if iso_month(d) == (ny, nm)
+        }
+        if spill:
+            next_map = month_day_map(ny, nm)
+            days.update({d: next_map[d] for d in spill if d in next_map})
+
+    decided = set()
+    for ym in {iso_month(d) for d in days}:
+        decided |= set(load_day_overrides(*ym) or {})
+    for b in blocks_covering_month(year, month):
+        who = b.get("assigned_to")
+        if who and any(
+            (load_forced_assignments(*iso_month(d)) or {}).get(d) == who
+            for d in b["days"]
+        ):
+            decided.update(b["days"])
+
+    pending, conflict = {}, {}
+    for d, who in days.items():
+        if not who or d in decided:
+            continue
+        y2, m2 = iso_month(d)
+        if not has_declared(users, who, y2, m2):
+            pending[d] = who
+        elif d not in availability_of(users, who, y2, m2):
+            conflict[d] = who
+    return pending, conflict
+
+
+def short_days(days) -> str:
+    return ", ".join(
+        dt.date.fromisoformat(d).strftime("%d/%m") for d in sorted(days)
+    )
+
+
+def confirmation_warning(pending: dict, conflict: dict) -> None:
+    """Résumé pour l'administrateur des jours à confirmer et des conflits."""
+    def by_person(days):
+        grouped = {}
+        for d, who in days.items():
+            grouped.setdefault(who, []).append(d)
+        return sorted(grouped.items(), key=lambda kv: min(kv[1]))
+
+    if pending:
+        parts = []
+        for who, ds in by_person(pending):
+            mois = ", ".join(
+                month_label(mm).lower() for _, mm in sorted({iso_month(d) for d in ds})
+            )
+            parts.append(
+                f"{display_name(users, who)} le(s) {short_days(ds)} "
+                f"({mois} pas encore saisi)"
+            )
+        st.info(
+            "À confirmer : " + " ; ".join(parts) + ". Le statut se met à "
+            "jour tout seul dès que la personne enregistre ses disponibilités."
+        )
+
+    if conflict:
+        parts = [
+            f"{display_name(users, who)} le(s) {short_days(ds)}"
+            for who, ds in by_person(conflict)
+        ]
+        st.warning(
+            "Conflit : " + " ; ".join(parts) + " — prévu(e) sur des jours "
+            "non cochés dans ses disponibilités. Retouchez ces jours ou "
+            "régénérez le planning."
+        )
+
+
 def generation_forced(year: int, month: int) -> dict:
     """
     Forçages utilisables pour générer ce mois. Ceux du mois suivant
@@ -400,7 +523,9 @@ def day_map_as_blocks(day_map: dict) -> list:
 # ============================================================
 def render_calendar(*, users, theme, day_map, year, month,
                     uncovered_label="Non couvert", show_legend=True,
-                    show_stats=True):
+                    show_stats=True, pending_days=None, conflict_days=None):
+    pending_days = pending_days or set()
+    conflict_days = conflict_days or set()
     cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(year, month)
     holidays = holidays_of_month(year, month)
@@ -413,6 +538,8 @@ def render_calendar(*, users, theme, day_map, year, month,
     covered = 0
     total = 0
     worked_holidays = 0
+    n_pending = 0
+    n_conflict = 0
 
     for week in weeks:
         for day in week:
@@ -423,11 +550,23 @@ def render_calendar(*, users, theme, day_map, year, month,
                 continue
 
             total += 1
-            assigned = day_map.get(day.isoformat())
+            iso = day.isoformat()
+            assigned = day_map.get(iso)
             holiday_name = holidays.get(day)
 
-            extra_class = " pl-holiday" if holiday_name else ""
-            tooltip = f' title="{esc(holiday_name)}"' if holiday_name else ""
+            extra_class, notes = "", []
+            if holiday_name:
+                extra_class += " pl-holiday"
+                notes.append(holiday_name)
+            if assigned and iso in pending_days:
+                extra_class += " pl-pending"
+                notes.append("à confirmer")
+                n_pending += 1
+            elif assigned and iso in conflict_days:
+                extra_class += " pl-conflict"
+                notes.append("conflit : jour non coché par le titulaire")
+                n_conflict += 1
+            tooltip = f' title="{esc(" · ".join(notes))}"' if notes else ""
 
             if assigned:
                 covered += 1
@@ -461,6 +600,16 @@ def render_calendar(*, users, theme, day_map, year, month,
             for d, name in holidays.items()
         )
         parts.append(f'<div class="pl-hol-list">{items}</div>')
+
+    if n_pending or n_conflict:
+        keys = []
+        if n_pending:
+            keys.append("bordure orange pointillée : à confirmer")
+        if n_conflict:
+            keys.append("bordure rouge : conflit")
+        parts.append(
+            f'<div class="pl-mark-key">{" · ".join(keys).capitalize()}</div>'
+        )
 
     if show_legend:
         present = sorted({u for u in day_map.values() if u})
@@ -497,6 +646,19 @@ def render_calendar(*, users, theme, day_map, year, month,
                 f'<div><div class="pl-stat-l">Fériés travaillés</div>'
                 f'<div class="pl-stat-v" style="color:{HOLIDAY_LINE}">'
                 f'{worked_holidays}/{len(holidays)}</div></div>'
+            )
+
+        if n_pending:
+            stats += (
+                f'<div><div class="pl-stat-l">À confirmer</div>'
+                f'<div class="pl-stat-v" style="color:#EF9F27">'
+                f'{n_pending} j</div></div>'
+            )
+        if n_conflict:
+            stats += (
+                f'<div><div class="pl-stat-l">Conflits</div>'
+                f'<div class="pl-stat-v" style="color:{DANGER_FG}">'
+                f'{n_conflict} j</div></div>'
             )
 
         parts.append(f'<div class="pl-stats">{stats}</div>')
@@ -630,9 +792,27 @@ def months_to_show():
     return out
 
 
-def my_availability_section(y: int, m: int, forced: dict, editing) -> None:
+def my_availability_section(y: int, m: int, forced: dict, editing,
+                            pending: dict, conflict: dict) -> None:
     """Grille de mes disponibilités, en lecture ou en saisie."""
     stored = availability_of(users, current_email, y, m)
+
+    mine_p = [d for d, w in pending.items()
+              if w == current_email and iso_month(d) == (y, m)]
+    mine_c = [d for d, w in conflict.items()
+              if w == current_email and iso_month(d) == (y, m)]
+    if mine_p:
+        st.info(
+            f"Vous êtes prévu(e) le(s) {short_days(mine_p)}, fin d'un bloc "
+            f"commencé le mois précédent. Enregistrez vos disponibilités de "
+            f"{month_label(m).lower()} pour confirmer."
+        )
+    if mine_c:
+        st.warning(
+            f"Vous êtes prévu(e) le(s) {short_days(mine_c)}, mais ces jours "
+            "ne sont pas cochés dans vos disponibilités. Cochez-les ou "
+            "prévenez l'administrateur."
+        )
 
     if editing == (y, m):
         render_availability_editor(
@@ -822,6 +1002,8 @@ with tab_feed:
             month_header(f"{month_label(m)} {y}", "À venir",
                          NEUTRAL_BG, NEUTRAL_FG, top=26)
 
+        pending, conflict = confirmation_status(y, m)
+
         # ---------- Le planning ----------
         if show_planning:
             day_map = month_day_map(y, m)
@@ -831,6 +1013,8 @@ with tab_feed:
                 users=users, theme=theme, day_map=day_map,
                 year=y, month=m,
                 uncovered_label="—" if locked else "Non couvert",
+                pending_days={d for d in pending if iso_month(d) == (y, m)},
+                conflict_days={d for d in conflict if iso_month(d) == (y, m)},
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -867,6 +1051,7 @@ with tab_feed:
 
             if admin:
                 stale_warning(day_map, forced, y, m)
+                confirmation_warning(pending, conflict)
                 override_editor(y, m, day_map)
 
         # ---------- Mes disponibilités (tant que non verrouillé) ----------
@@ -874,9 +1059,11 @@ with tab_feed:
             if show_planning:
                 with st.expander("Mes disponibilités",
                                  expanded=(editing == (y, m))):
-                    my_availability_section(y, m, forced, editing)
+                    my_availability_section(y, m, forced, editing,
+                                            pending, conflict)
             else:
-                my_availability_section(y, m, forced, editing)
+                my_availability_section(y, m, forced, editing,
+                                        pending, conflict)
 
         if month_holidays:
             items = " · ".join(
@@ -902,6 +1089,7 @@ with tab_feed:
                 year=y, month=m, users=users,
                 availability_by_user=generation_availability(users, y, m),
                 forced_assignments=generation_forced(y, m),
+                pending_days_by_user=generation_pending(users, y, m),
             )
             save_planning_proposal(y, m, "current", planning, current_email)
             for warning in planning.get("warnings", []):

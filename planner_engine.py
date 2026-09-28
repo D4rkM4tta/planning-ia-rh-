@@ -140,8 +140,13 @@ def _solve_once(
         forced_assignments,
         target_hours,
         tolerance=0.15,
+        pending_days_by_user=None,
 ):
+    pending = pending_days_by_user or {}
     eligible = defaultdict(list)
+    # Blocs accessibles seulement en comptant des jours que la personne
+    # n'a pas encore pu déclarer (mois suivant pas encore saisi).
+    eligible_pending = defaultdict(list)
     block_by_id = {b["id"]: b for b in blocks}
 
     # 🔒 Détection des blocs forcés
@@ -167,6 +172,10 @@ def _solve_once(
             else:
                 if all(d in avail for d in block["days"]):
                     eligible[u].append(block["id"])
+                elif pending.get(u) and all(
+                    d in avail or d in pending[u] for d in block["days"]
+                ):
+                    eligible_pending[u].append(block["id"])
 
     assigned_by_user = defaultdict(set)
     hours_by_user = defaultdict(int)
@@ -217,30 +226,36 @@ def _solve_once(
             hours_by_user[u] = projected
             break
 
-    # 3️⃣ REMPLISSAGE FINAL
-    for block in blocks:
-        if block["assigned_to"]:
-            continue
-        random.shuffle(users_sorted)
-        for u in users_sorted:
-            if block["id"] not in eligible[u]:
-                continue
-            if violates_consecutive(u, block):
-                continue
+    # 3️⃣ REMPLISSAGE FINAL, puis 4️⃣ REMPLISSAGE « À CONFIRMER »
+    # Le second passage ne s'appuie sur des jours non encore déclarés
+    # qu'en dernier recours : un collaborateur qui a confirmé ses
+    # disponibilités passe toujours avant.
+    pools = [eligible] + ([eligible_pending] if eligible_pending else [])
 
-            projected = hours_by_user[u] + len(block["days"]) * HOURS_PER_DAY
-            max_hours = target_hours[u] * (1 + tolerance)
-
-            if projected > max_hours:
-                if overflow_used[u]:
+    for pool in pools:
+        for block in blocks:
+            if block["assigned_to"]:
+                continue
+            random.shuffle(users_sorted)
+            for u in users_sorted:
+                if block["id"] not in pool[u]:
                     continue
-                overflow_used[u] = True
+                if violates_consecutive(u, block):
+                    continue
 
-            block["assigned_to"] = u
-            assigned_blocks.add(block["id"])
-            assigned_by_user[u].add(block["id"])
-            hours_by_user[u] = projected
-            break
+                projected = hours_by_user[u] + len(block["days"]) * HOURS_PER_DAY
+                max_hours = target_hours[u] * (1 + tolerance)
+
+                if projected > max_hours:
+                    if overflow_used[u]:
+                        continue
+                    overflow_used[u] = True
+
+                block["assigned_to"] = u
+                assigned_blocks.add(block["id"])
+                assigned_by_user[u].add(block["id"])
+                hours_by_user[u] = projected
+                break
 
     covered = sum(1 for b in blocks if b["assigned_to"])
     return blocks, covered
@@ -259,7 +274,14 @@ def generate_planning(
         forced_assignments: dict,
         attempts: int = 80,
         seed: int | None = None,
+        pending_days_by_user: dict | None = None,
 ):
+    """
+    pending_days_by_user : {email: jours}. Jours du mois suivant qu'un
+    collaborateur n'a pas encore pu déclarer. Ils ne servent qu'à couvrir
+    un bloc à cheval que personne ne peut couvrir autrement ; le bloc est
+    alors « à confirmer » tant que la personne n'a pas saisi ce mois.
+    """
     if seed is not None:
         random.seed(seed)
 
@@ -284,7 +306,24 @@ def generate_planning(
 
     total_blocks = len(base_blocks)
     best_blocks = None
-    best_score = -1
+    best_score = (-1, 0)
+
+    def pending_count(solved) -> int:
+        """Blocs attribués grâce à des jours pas encore déclarés."""
+        n = 0
+        for b in solved:
+            u = b.get("assigned_to")
+            if u and not all(d in availability_by_user.get(u, {})
+                             for d in b["days"]):
+                if b["id"] in forced_ids:
+                    continue
+                n += 1
+        return n
+
+    forced_ids = {
+        b["id"] for b in base_blocks
+        if any(d in forced_assignments for d in b["days"])
+    }
 
     for _ in range(attempts):
         blocks = [{**b, "assigned_to": None} for b in base_blocks]
@@ -296,19 +335,28 @@ def generate_planning(
             availability_by_user,
             forced_assignments,
             target_hours,
+            pending_days_by_user=pending_days_by_user,
         )
 
-        if solved and score > best_score:
-            best_blocks = solved
-            best_score = score
+        if not solved:
+            continue
 
-        if best_score == total_blocks:
+        # Couvrir d'abord le plus de blocs, puis recourir le moins possible
+        # à des jours « à confirmer » : on cherche tant qu'on peut éviter
+        # d'en utiliser.
+        full = (score, -pending_count(solved))
+        if full > best_score:
+            best_blocks = solved
+            best_score = full
+
+        if best_score == (total_blocks, 0):
             break
 
     warnings = []
-    if best_blocks and best_score < total_blocks:
+    covered = best_score[0]
+    if best_blocks and covered < total_blocks:
         warnings.append(
-            f"{total_blocks - best_score} bloc(s) non couvert(s) "
+            f"{total_blocks - covered} bloc(s) non couvert(s) "
             f"sur {total_blocks}."
         )
 

@@ -144,11 +144,19 @@ def save_availability(email: str, year: int, month: int,
     retirés survivraient à l'enregistrement. On supprime donc le
     champ avant de le réécrire, pour que décocher un jour soit bien
     pris en compte.
+
+    On note aussi la date d'enregistrement : un mois enregistré sans
+    aucun jour coché (congés, par exemple) doit se distinguer d'un mois
+    jamais saisi, qui seul autorise une attribution « à confirmer ».
     """
     field = f"availability_{year}_{month}"
     ref = USERS.document(normalize_email(email))
 
-    ref.set({field: firestore.DELETE_FIELD}, merge=True)
+    ref.set({
+        field: firestore.DELETE_FIELD,
+        f"availability_saved_{year}_{month}":
+            dt.datetime.now(timezone.utc).isoformat(),
+    }, merge=True)
     if availability:
         ref.set({field: availability}, merge=True)
 
